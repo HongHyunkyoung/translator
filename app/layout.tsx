@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Live Translate",
-  description: "Realtime transcription and translation powered by the OpenAI Realtime API.",
+  description: "Realtime transcription and translation powered by OpenAI Realtime or Gemini Live.",
 };
 
 export default function RootLayout({

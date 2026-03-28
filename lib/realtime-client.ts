@@ -1,17 +1,53 @@
 import {
   buildRealtimeSessionConfig,
-  buildTranslatorInstructions,
-  type RealtimeSessionConfig,
+  type GeminiLiveSessionConfig,
+  type OpenAIRealtimeSessionConfig,
+  type RealtimeProvider,
   type TranslatorSettings,
 } from "@/lib/realtime-config";
 import type { ConnectionStatus } from "@/lib/realtime-store";
 
-type SessionResponse = {
+type OpenAISessionResponse = {
+  provider: "openai";
   ephemeralKey: string;
   model: string;
   transcriptionModel: string;
-  sessionConfig: RealtimeSessionConfig;
+  sessionConfig: OpenAIRealtimeSessionConfig;
 };
+
+type GeminiSessionResponse = {
+  provider: "gemini";
+  ephemeralKey: string;
+  model: string;
+  translationModel: string;
+  sessionConfig: GeminiLiveSessionConfig;
+};
+
+type SessionResponse = OpenAISessionResponse | GeminiSessionResponse;
+
+function isOpenAISessionResponse(value: unknown): value is OpenAISessionResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "provider" in value &&
+    value.provider === "openai" &&
+    "ephemeralKey" in value &&
+    typeof value.ephemeralKey === "string" &&
+    "sessionConfig" in value
+  );
+}
+
+function isGeminiSessionResponse(value: unknown): value is GeminiSessionResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "provider" in value &&
+    value.provider === "gemini" &&
+    "ephemeralKey" in value &&
+    typeof value.ephemeralKey === "string" &&
+    "sessionConfig" in value
+  );
+}
 
 export type ClientConnectOptions = {
   settings: TranslatorSettings;
@@ -58,6 +94,18 @@ type RealtimeServerEvent = {
   [key: string]: unknown;
 };
 
+type GeminiServerMessage = {
+  setupComplete?: Record<string, unknown>;
+  serverContent?: {
+    inputTranscription?: {
+      text?: unknown;
+      finished?: unknown;
+    };
+    turnComplete?: unknown;
+  };
+  error?: unknown;
+};
+
 function normalizeErrorMessage(value: unknown) {
   if (typeof value === "string" && value.trim()) {
     return value;
@@ -73,7 +121,7 @@ function normalizeErrorMessage(value: unknown) {
     return value.message;
   }
 
-  return "The Realtime API returned an unexpected error.";
+  return "The realtime provider returned an unexpected error.";
 }
 
 function formatRateLimitMessage(rateLimits: unknown) {
@@ -113,6 +161,101 @@ function getStringValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
 }
 
+export async function extractGeminiServerEventText(rawData: unknown) {
+  if (typeof rawData === "string") {
+    return rawData.trimStart().startsWith("{") ? rawData : null;
+  }
+
+  if (
+    rawData instanceof ArrayBuffer ||
+    Object.prototype.toString.call(rawData) === "[object ArrayBuffer]"
+  ) {
+    const text = new TextDecoder().decode(rawData as ArrayBuffer);
+    return text.trimStart().startsWith("{") ? text : null;
+  }
+
+  if (ArrayBuffer.isView(rawData)) {
+    const text = new TextDecoder().decode(rawData);
+    return text.trimStart().startsWith("{") ? text : null;
+  }
+
+  if (typeof Blob !== "undefined" && rawData instanceof Blob) {
+    const text = await rawData.text();
+    return text.trimStart().startsWith("{") ? text : null;
+  }
+
+  return null;
+}
+
+export type ParsedGeminiServerEvent = {
+  setupComplete: boolean;
+  turnComplete: boolean;
+  inputTranscription?: {
+    text: string;
+    finished: boolean;
+  };
+  errorMessage?: string;
+};
+
+export function parseGeminiServerEvent(rawEvent: string): ParsedGeminiServerEvent {
+  let message: GeminiServerMessage;
+
+  try {
+    message = JSON.parse(rawEvent) as GeminiServerMessage;
+  } catch {
+    return {
+      setupComplete: false,
+      turnComplete: false,
+      errorMessage: "Received a malformed event from Gemini Live.",
+    };
+  }
+
+  if (message.error) {
+    return {
+      setupComplete: false,
+      turnComplete: false,
+      errorMessage: normalizeErrorMessage(message.error),
+    };
+  }
+
+  return {
+    setupComplete: Boolean(message.setupComplete),
+    turnComplete: message.serverContent?.turnComplete === true,
+    inputTranscription: message.serverContent?.inputTranscription
+      ? {
+          text: getStringValue(message.serverContent.inputTranscription.text) ?? "",
+          finished: message.serverContent.inputTranscription.finished === true,
+        }
+      : undefined,
+  };
+}
+export function mergeGeminiTranscript(existingText: string, incomingText: string) {
+  if (!incomingText) {
+    return existingText;
+  }
+
+  if (!existingText) {
+    return incomingText;
+  }
+
+  if (incomingText.startsWith(existingText)) {
+    return incomingText;
+  }
+
+  if (existingText.startsWith(incomingText)) {
+    return existingText;
+  }
+
+  const maxOverlap = Math.min(existingText.length, incomingText.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (existingText.endsWith(incomingText.slice(0, overlap))) {
+      return existingText + incomingText.slice(overlap);
+    }
+  }
+
+  return existingText + incomingText;
+}
+
 async function readErrorResponse(response: Response) {
   const text = await response.text();
   if (!text) {
@@ -120,18 +263,83 @@ async function readErrorResponse(response: Response) {
   }
 
   try {
-    const payload = JSON.parse(text) as { error?: { message?: string } };
+    const payload = JSON.parse(text) as { error?: { message?: string } | string };
+    if (typeof payload.error === "string") {
+      return payload.error;
+    }
+
     return payload.error?.message ?? text;
   } catch {
     return text;
   }
 }
 
-export class RealtimeTranslatorClient implements TranslatorClient {
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return window.btoa(binary);
+}
+
+function downsampleTo16BitPcm(
+  input: Float32Array,
+  inputSampleRate: number,
+  outputSampleRate = 16000,
+) {
+  if (input.length === 0) {
+    return new Int16Array();
+  }
+
+  if (inputSampleRate === outputSampleRate) {
+    const direct = new Int16Array(input.length);
+    for (let index = 0; index < input.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, input[index] ?? 0));
+      direct[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    }
+    return direct;
+  }
+
+  const sampleRateRatio = inputSampleRate / outputSampleRate;
+  const outputLength = Math.max(1, Math.round(input.length / sampleRateRatio));
+  const result = new Int16Array(outputLength);
+  let outputIndex = 0;
+  let inputIndex = 0;
+
+  while (outputIndex < outputLength) {
+    const nextInputIndex = Math.min(
+      input.length,
+      Math.round((outputIndex + 1) * sampleRateRatio),
+    );
+
+    let total = 0;
+    let count = 0;
+    for (let index = inputIndex; index < nextInputIndex; index += 1) {
+      total += input[index] ?? 0;
+      count += 1;
+    }
+
+    const sample = count > 0 ? total / count : (input[inputIndex] ?? 0);
+    const clamped = Math.max(-1, Math.min(1, sample));
+    result[outputIndex] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+
+    outputIndex += 1;
+    inputIndex = nextInputIndex;
+  }
+
+  return result;
+}
+
+class OpenAIRealtimeTranslatorClient implements TranslatorClient {
   private peerConnection: RTCPeerConnection | null = null;
   private dataChannel: RTCDataChannel | null = null;
   private mediaStream: MediaStream | null = null;
-  private sessionConfig: RealtimeSessionConfig | null = null;
+  private sessionConfig: OpenAIRealtimeSessionConfig | null = null;
   private settings: TranslatorSettings | null = null;
   private pendingTranslationTurnId: string | null = null;
 
@@ -270,7 +478,7 @@ export class RealtimeTranslatorClient implements TranslatorClient {
           turn_item_id: itemId,
           target_language: settings.targetLanguage,
         },
-        instructions: buildTranslatorInstructions(settings),
+        instructions: this.sessionConfig?.instructions,
       },
     });
   }
@@ -289,11 +497,11 @@ export class RealtimeTranslatorClient implements TranslatorClient {
       | { error?: string }
       | null;
 
-    if (!response.ok || !payload || !("ephemeralKey" in payload)) {
+    if (!response.ok || !isOpenAISessionResponse(payload)) {
       const message =
         payload && "error" in payload && typeof payload.error === "string"
           ? payload.error
-          : "Could not create an ephemeral Realtime session.";
+          : "Could not create an OpenAI Realtime session.";
       throw new Error(message);
     }
 
@@ -306,7 +514,7 @@ export class RealtimeTranslatorClient implements TranslatorClient {
     try {
       event = JSON.parse(rawEvent) as RealtimeServerEvent;
     } catch {
-      this.callbacks.onError("Received a malformed event from the Realtime API.");
+      this.callbacks.onError("Received a malformed event from the realtime provider.");
       return;
     }
 
@@ -441,6 +649,507 @@ export class RealtimeTranslatorClient implements TranslatorClient {
   }
 }
 
+class GeminiRealtimeTranslatorClient implements TranslatorClient {
+  private websocket: WebSocket | null = null;
+  private mediaStream: MediaStream | null = null;
+  private audioContext: AudioContext | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
+  private processorNode: ScriptProcessorNode | null = null;
+  private monitorNode: GainNode | null = null;
+  private settings: TranslatorSettings | null = null;
+  private transcriptsByItemId = new Map<string, string>();
+  private activeTranscriptTurn:
+    | {
+        itemId: string;
+        transcript: string;
+      }
+    | null = null;
+  private previousTurnId: string | null = null;
+  private turnCounter = 0;
+  private responseCounter = 0;
+  private lifecycleToken = 0;
+  private disconnecting = false;
+
+  constructor(private readonly callbacks: RealtimeClientCallbacks) {}
+
+  async connect({ settings }: ClientConnectOptions) {
+    this.disconnect();
+    this.disconnecting = false;
+    this.settings = settings;
+    const lifecycleToken = ++this.lifecycleToken;
+
+    this.callbacks.onConnectionStatus("requesting-permission");
+
+    try {
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch {
+      this.callbacks.onConnectionStatus("error");
+      throw new Error("Microphone access was denied. Allow microphone access and try again.");
+    }
+
+    this.callbacks.onConnectionStatus("connecting");
+
+    const sessionResponse = await this.createSession(settings);
+    await this.openSocket(sessionResponse, lifecycleToken);
+    await this.startAudioPipeline(lifecycleToken);
+  }
+
+  disconnect() {
+    this.disconnecting = true;
+    this.lifecycleToken += 1;
+    this.activeTranscriptTurn = null;
+    this.transcriptsByItemId.clear();
+    this.previousTurnId = null;
+    this.turnCounter = 0;
+    this.responseCounter = 0;
+
+    if (this.websocket?.readyState === WebSocket.OPEN) {
+      try {
+        this.websocket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+      } catch {
+        // Ignore send failures during shutdown.
+      }
+    }
+
+    if (this.websocket) {
+      this.websocket.close();
+      this.websocket = null;
+    }
+
+    if (this.processorNode) {
+      this.processorNode.disconnect();
+      this.processorNode.onaudioprocess = null;
+      this.processorNode = null;
+    }
+
+    if (this.monitorNode) {
+      this.monitorNode.disconnect();
+      this.monitorNode = null;
+    }
+
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
+    }
+
+    if (this.audioContext) {
+      void this.audioContext.close();
+      this.audioContext = null;
+    }
+
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => track.stop());
+      this.mediaStream = null;
+    }
+
+    this.callbacks.onConnectionStatus("idle");
+  }
+
+  updateSettings(settings: TranslatorSettings) {
+    this.settings = settings;
+  }
+
+  requestTranslation(itemId: string, settings: TranslatorSettings) {
+    this.settings = settings;
+
+    const transcript = this.transcriptsByItemId.get(itemId)?.trim();
+    if (!transcript) {
+      throw new Error("Transcript is not ready for translation yet.");
+    }
+
+    const responseId = `gemini-response-${++this.responseCounter}`;
+    const lifecycleToken = this.lifecycleToken;
+
+    this.callbacks.onResponseCreated({
+      responseId,
+      itemId,
+    });
+
+    void this.translateWithGemini({
+      itemId,
+      responseId,
+      transcript,
+      settings,
+      lifecycleToken,
+    });
+  }
+
+  private async createSession(settings: TranslatorSettings) {
+    const response = await fetch("/api/realtime/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(settings),
+    });
+
+    const payload = (await response.json().catch(() => null)) as
+      | SessionResponse
+      | { error?: string }
+      | null;
+
+    if (!response.ok || !isGeminiSessionResponse(payload)) {
+      const message =
+        payload && "error" in payload && typeof payload.error === "string"
+          ? payload.error
+          : "Could not create a Gemini Live session.";
+      throw new Error(message);
+    }
+
+    return payload;
+  }
+
+  private async openSocket(session: GeminiSessionResponse, lifecycleToken: number) {
+    const url =
+      "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained" +
+      `?access_token=${encodeURIComponent(session.ephemeralKey)}`;
+
+    await new Promise<void>((resolve, reject) => {
+      const websocket = new WebSocket(url);
+      let resolved = false;
+      this.websocket = websocket;
+
+      const rejectOnce = (error: Error) => {
+        if (resolved) {
+          return;
+        }
+
+        resolved = true;
+        reject(error);
+      };
+
+      websocket.onopen = () => {
+        websocket.send(
+          JSON.stringify({
+            setup: session.sessionConfig,
+          }),
+        );
+      };
+
+      websocket.onmessage = async (event) => {
+        try {
+          const rawMessage = await extractGeminiServerEventText(event.data);
+          if (!rawMessage) {
+            return;
+          }
+
+          const result = this.handleGeminiMessage(rawMessage);
+
+          if (result.errorMessage) {
+            if (!resolved) {
+              rejectOnce(new Error(result.errorMessage));
+            }
+            return;
+          }
+
+          if (!resolved && result.setupComplete) {
+            resolved = true;
+            this.callbacks.onConnectionStatus("connected");
+            resolve();
+          }
+        } catch (error) {
+          const message = normalizeErrorMessage(error);
+          if (!resolved) {
+            rejectOnce(new Error(message));
+            return;
+          }
+
+          this.callbacks.onError(message);
+        }
+      };
+
+      websocket.onerror = () => {
+        rejectOnce(new Error("Gemini Live connection failed."));
+      };
+
+      websocket.onclose = (event) => {
+        if (!resolved) {
+          rejectOnce(
+            new Error(
+              event.reason || "Gemini Live connection closed before setup completed.",
+            ),
+          );
+          return;
+        }
+
+        if (this.disconnecting || this.lifecycleToken !== lifecycleToken) {
+          return;
+        }
+
+        this.callbacks.onConnectionStatus("error");
+        this.callbacks.onError(event.reason || "Gemini Live session closed unexpectedly.");
+      };
+    });
+  }
+
+  private handleGeminiMessage(rawEvent: string) {
+    const event = parseGeminiServerEvent(rawEvent);
+
+    if (event.errorMessage) {
+      this.callbacks.onError(event.errorMessage);
+      return {
+        setupComplete: false,
+        errorMessage: event.errorMessage,
+      };
+    }
+
+    if (event.inputTranscription) {
+      this.handleInputTranscription(event.inputTranscription);
+    }
+
+    if (event.turnComplete) {
+      this.completeActiveTranscript();
+    }
+
+    return {
+      setupComplete: event.setupComplete,
+    };
+  }
+
+  private handleInputTranscription(transcription: { text: string; finished: boolean }) {
+    const text = transcription.text;
+    const finished = transcription.finished;
+
+    if (!text && !finished) {
+      return;
+    }
+
+    if (!this.activeTranscriptTurn) {
+      const itemId = `gemini-turn-${++this.turnCounter}`;
+      this.activeTranscriptTurn = {
+        itemId,
+        transcript: "",
+      };
+
+      this.callbacks.onTurnCommitted({
+        itemId,
+        previousItemId: this.previousTurnId,
+        sourceLanguage:
+          this.settings?.sourceLanguageMode === "manual"
+            ? this.settings.sourceLanguage ?? null
+            : null,
+      });
+
+      this.previousTurnId = itemId;
+    }
+
+    const activeTurn = this.activeTranscriptTurn;
+    if (!activeTurn) {
+      return;
+    }
+
+    const mergedTranscript = text
+      ? mergeGeminiTranscript(activeTurn.transcript, text)
+      : activeTurn.transcript;
+    const delta = mergedTranscript.startsWith(activeTurn.transcript)
+      ? mergedTranscript.slice(activeTurn.transcript.length)
+      : "";
+
+    if (delta) {
+      this.callbacks.onTranscriptDelta({
+        itemId: activeTurn.itemId,
+        delta,
+      });
+    }
+
+    activeTurn.transcript = mergedTranscript;
+
+    if (!finished) {
+      return;
+    }
+
+    this.completeActiveTranscript(mergedTranscript);
+  }
+
+  private completeActiveTranscript(transcriptOverride?: string) {
+    const activeTurn = this.activeTranscriptTurn;
+    if (!activeTurn) {
+      return;
+    }
+
+    const finalTranscript = (transcriptOverride ?? activeTurn.transcript).trim();
+    this.transcriptsByItemId.set(activeTurn.itemId, finalTranscript);
+    this.callbacks.onTranscriptCompleted({
+      itemId: activeTurn.itemId,
+      transcript: finalTranscript,
+    });
+    this.activeTranscriptTurn = null;
+  }
+
+  private async startAudioPipeline(lifecycleToken: number) {
+    if (!this.mediaStream) {
+      throw new Error("Microphone audio is not available.");
+    }
+
+    if (typeof window === "undefined" || !window.AudioContext) {
+      throw new Error("This browser does not support the Web Audio API needed for Gemini Live.");
+    }
+
+    const audioContext = new window.AudioContext();
+    await audioContext.resume();
+
+    const sourceNode = audioContext.createMediaStreamSource(this.mediaStream);
+    const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+    const monitorNode = audioContext.createGain();
+    monitorNode.gain.value = 0;
+
+    processorNode.onaudioprocess = (event) => {
+      if (
+        this.disconnecting ||
+        this.lifecycleToken !== lifecycleToken ||
+        !this.websocket ||
+        this.websocket.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
+
+      const channelData = event.inputBuffer.getChannelData(0);
+      const pcm16 = downsampleTo16BitPcm(channelData, audioContext.sampleRate);
+
+      if (pcm16.length === 0) {
+        return;
+      }
+
+      this.websocket.send(
+        JSON.stringify({
+          realtimeInput: {
+            audio: {
+              data: arrayBufferToBase64(pcm16.buffer),
+              mimeType: "audio/pcm;rate=16000",
+            },
+          },
+        }),
+      );
+    };
+
+    sourceNode.connect(processorNode);
+    processorNode.connect(monitorNode);
+    monitorNode.connect(audioContext.destination);
+
+    this.audioContext = audioContext;
+    this.sourceNode = sourceNode;
+    this.processorNode = processorNode;
+    this.monitorNode = monitorNode;
+  }
+
+  private async translateWithGemini(options: {
+    itemId: string;
+    responseId: string;
+    transcript: string;
+    settings: TranslatorSettings;
+    lifecycleToken: number;
+  }) {
+    try {
+      const response = await fetch("/api/realtime/translate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "gemini",
+          transcript: options.transcript,
+          settings: options.settings,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response));
+      }
+
+      const payload = (await response.json()) as { text?: unknown };
+      const text = getStringValue(payload.text)?.trim();
+      if (!text) {
+        throw new Error("Gemini did not return translated text.");
+      }
+
+      if (this.lifecycleToken !== options.lifecycleToken) {
+        return;
+      }
+
+      this.callbacks.onTranslationOutputDone({
+        responseId: options.responseId,
+        itemId: options.itemId,
+        text,
+      });
+      this.callbacks.onResponseDone({
+        responseId: options.responseId,
+        itemId: options.itemId,
+        failedMessage: null,
+      });
+    } catch (error) {
+      if (this.lifecycleToken !== options.lifecycleToken) {
+        return;
+      }
+
+      const message = normalizeErrorMessage(error);
+      this.callbacks.onError(message);
+      this.callbacks.onResponseDone({
+        responseId: options.responseId,
+        itemId: options.itemId,
+        failedMessage: message,
+      });
+    }
+  }
+}
+
+export class RealtimeTranslatorClient implements TranslatorClient {
+  private activeProvider: RealtimeProvider | null = null;
+  private transport: TranslatorClient | null = null;
+
+  constructor(private readonly callbacks: RealtimeClientCallbacks) {}
+
+  async connect(options: ClientConnectOptions) {
+    const transport = this.ensureTransport(options.settings.provider);
+    await transport.connect(options);
+  }
+
+  disconnect() {
+    this.transport?.disconnect();
+    this.transport = null;
+    this.activeProvider = null;
+  }
+
+  updateSettings(settings: TranslatorSettings) {
+    if (this.activeProvider && settings.provider !== this.activeProvider) {
+      this.disconnect();
+      this.callbacks.onError("Provider changed. Start listening again to switch backends.");
+      return;
+    }
+
+    this.ensureTransport(settings.provider).updateSettings(settings);
+  }
+
+  requestTranslation(itemId: string, settings: TranslatorSettings) {
+    this.ensureTransport(settings.provider).requestTranslation(itemId, settings);
+  }
+
+  private ensureTransport(provider: RealtimeProvider) {
+    if (this.transport && this.activeProvider === provider) {
+      return this.transport;
+    }
+
+    if (this.transport) {
+      this.transport.disconnect();
+    }
+
+    this.activeProvider = provider;
+    this.transport =
+      provider === "gemini"
+        ? new GeminiRealtimeTranslatorClient(this.callbacks)
+        : new OpenAIRealtimeTranslatorClient(this.callbacks);
+
+    return this.transport;
+  }
+}
+
 export function createRealtimeTranslatorClient(callbacks: RealtimeClientCallbacks) {
   return new RealtimeTranslatorClient(callbacks);
 }
+

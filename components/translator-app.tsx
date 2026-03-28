@@ -8,6 +8,7 @@ import {
 } from "@/lib/realtime-client";
 import { DEFAULT_TARGET_LANGUAGE, LANGUAGE_OPTIONS, getLanguageLabel } from "@/lib/languages";
 import {
+  type RealtimeProvider,
   type SourceLanguageMode,
   type TranslatorSettings,
 } from "@/lib/realtime-config";
@@ -22,7 +23,28 @@ import {
 
 type TranslatorAppProps = {
   clientFactory?: (callbacks: RealtimeClientCallbacks) => TranslatorClient;
+  providerResolver?: () => Promise<RealtimeProvider>;
+  speechStartTimeoutMs?: number;
 };
+
+async function resolveProviderFromServer(): Promise<RealtimeProvider> {
+  const response = await fetch("/api/realtime/provider", {
+    cache: "no-store",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | { provider?: unknown; error?: string }
+    | null;
+
+  if (!response.ok || !payload || (payload.provider !== "openai" && payload.provider !== "gemini")) {
+    throw new Error(
+      payload?.error ?? "Could not detect which realtime provider is configured on the server.",
+    );
+  }
+
+  return payload.provider;
+}
+
+const SERVER_TTS_START_TIMEOUT_MS = 250;
 
 function getConnectionLabel(status: ConnectionStatus) {
   switch (status) {
@@ -51,6 +73,18 @@ function getConnectionTone(status: ConnectionStatus) {
     default:
       return "muted";
   }
+}
+
+function getProviderLabel(provider: RealtimeProvider | null) {
+  if (provider === "gemini") {
+    return "Gemini";
+  }
+
+  if (provider === "openai") {
+    return "OpenAI";
+  }
+
+  return "Detecting";
 }
 
 function getTurnStatusLabel(turn: TranslationTurn) {
@@ -83,29 +117,373 @@ function buildCopyBlock(turns: TranslationTurn[], kind: "transcript" | "translat
     .join("\n\n");
 }
 
+function getSpeechLocale(targetLanguage: string) {
+  return LANGUAGE_OPTIONS.find((language) => language.code === targetLanguage)?.locale ?? "en-US";
+}
+
+async function readSpeechErrorResponse(response: Response) {
+  const text = await response.text();
+  if (!text) {
+    return `Speech route returned ${response.status}.`;
+  }
+
+  try {
+    const payload = JSON.parse(text) as { error?: unknown };
+    return typeof payload.error === "string" && payload.error ? payload.error : text;
+  } catch {
+    return text;
+  }
+}
+
+function canUseBrowserSpeechSynthesis() {
+  return (
+    typeof window !== "undefined" &&
+    typeof SpeechSynthesisUtterance !== "undefined" &&
+    "speechSynthesis" in window
+  );
+}
+
+function stopBrowserSpeechSynthesis() {
+  if (canUseBrowserSpeechSynthesis()) {
+    window.speechSynthesis.cancel();
+  }
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function getVoicePreferenceScore(
+  voice: SpeechSynthesisVoice,
+  locale: string,
+  targetLanguage: string,
+) {
+  const normalizedVoiceLanguage = voice.lang.toLowerCase();
+  const normalizedLocale = locale.toLowerCase();
+  const normalizedTargetLanguage = targetLanguage.toLowerCase();
+  const normalizedName = voice.name.toLowerCase();
+
+  let score = 0;
+
+  if (normalizedVoiceLanguage === normalizedLocale) {
+    score += 8;
+  } else if (normalizedVoiceLanguage.startsWith(normalizedTargetLanguage + "-")) {
+    score += 5;
+  }
+
+  if (voice.localService) {
+    score += 3;
+  }
+
+  if (/(natural|neural|premium|enhanced|wavenet|studio|siri)/i.test(normalizedName)) {
+    score += 4;
+  }
+
+  if (/(google|microsoft|apple)/i.test(normalizedName)) {
+    score += 2;
+  }
+
+  if (voice.default) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function selectPreferredSpeechVoice(
+  voices: SpeechSynthesisVoice[],
+  locale: string,
+  targetLanguage: string,
+) {
+  const rankedVoices = voices
+    .filter((voice) => {
+      const normalizedVoiceLanguage = voice.lang.toLowerCase();
+      const normalizedLocale = locale.toLowerCase();
+      const normalizedTargetLanguage = targetLanguage.toLowerCase();
+
+      return (
+        normalizedVoiceLanguage === normalizedLocale ||
+        normalizedVoiceLanguage.startsWith(normalizedTargetLanguage + "-")
+      );
+    })
+    .sort(
+      (left, right) =>
+        getVoicePreferenceScore(right, locale, targetLanguage) -
+        getVoicePreferenceScore(left, locale, targetLanguage),
+    );
+
+  return rankedVoices[0] ?? null;
+}
+
+function speakTranslation(text: string, targetLanguage: string) {
+  const spokenText = text.trim();
+  if (!spokenText || !canUseBrowserSpeechSynthesis()) {
+    return;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(spokenText);
+  const locale = getSpeechLocale(targetLanguage);
+  utterance.lang = locale;
+  utterance.rate = 0.96;
+  utterance.pitch = 1;
+
+  const matchingVoice = selectPreferredSpeechVoice(
+    window.speechSynthesis.getVoices(),
+    locale,
+    targetLanguage,
+  );
+
+  if (matchingVoice) {
+    utterance.voice = matchingVoice;
+  }
+
+  stopBrowserSpeechSynthesis();
+  window.speechSynthesis.speak(utterance);
+}
+
 function describeError(error: unknown) {
   if (error instanceof Error && error.message) {
     return error.message;
   }
 
-  return "Something went wrong while talking to the Realtime API.";
+  return "Something went wrong while talking to the selected realtime provider.";
 }
 
 export function TranslatorApp({
   clientFactory = createRealtimeTranslatorClient,
+  providerResolver = resolveProviderFromServer,
+  speechStartTimeoutMs = SERVER_TTS_START_TIMEOUT_MS,
 }: TranslatorAppProps) {
   const [state, dispatch] = useReducer(translatorReducer, initialTranslatorState);
+  const [provider, setProvider] = useState<RealtimeProvider | null>(null);
   const [targetLanguage, setTargetLanguage] = useState(DEFAULT_TARGET_LANGUAGE);
   const [sourceLanguageMode, setSourceLanguageMode] = useState<SourceLanguageMode>("auto");
-  const [sourceLanguage, setSourceLanguage] = useState("ko");
+  const [sourceLanguage, setSourceLanguage] = useState("en");
+  const [enableSpeech, setEnableSpeech] = useState(true);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
   const clientRef = useRef<TranslatorClient | null>(null);
+  const enableSpeechRef = useRef(enableSpeech);
+  const providerRef = useRef<RealtimeProvider | null>(provider);
+  const targetLanguageRef = useRef(targetLanguage);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const speechAbortControllerRef = useRef<AbortController | null>(null);
+  const speechRequestRef = useRef(0);
 
-  const settings: TranslatorSettings = {
-    targetLanguage,
-    sourceLanguageMode,
-    sourceLanguage,
-  };
+  const settings: TranslatorSettings | null = provider
+    ? {
+        provider,
+        targetLanguage,
+        sourceLanguageMode,
+        sourceLanguage,
+      }
+    : null;
+
+  useEffect(() => {
+    let active = true;
+
+    void providerResolver()
+      .then((resolvedProvider) => {
+        if (!active) {
+          return;
+        }
+
+        setProvider(resolvedProvider);
+        dispatch({ type: "error/set", message: null });
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        dispatch({ type: "error/set", message: describeError(error) });
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [providerResolver]);
+
+  useEffect(() => {
+    enableSpeechRef.current = enableSpeech;
+  }, [enableSpeech]);
+
+  useEffect(() => {
+    providerRef.current = provider;
+  }, [provider]);
+
+  useEffect(() => {
+    targetLanguageRef.current = targetLanguage;
+  }, [targetLanguage]);
+
+  function releaseActiveAudio() {
+    const activeAudio = audioRef.current;
+    if (activeAudio) {
+      activeAudio.onended = null;
+      activeAudio.onerror = null;
+      activeAudio.pause();
+      audioRef.current = null;
+    }
+
+    if (audioUrlRef.current) {
+      if (typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+      audioUrlRef.current = null;
+    }
+  }
+
+  function stopActiveSpeech() {
+    speechRequestRef.current += 1;
+    speechAbortControllerRef.current?.abort();
+    speechAbortControllerRef.current = null;
+    releaseActiveAudio();
+    stopBrowserSpeechSynthesis();
+  }
+
+  useEffect(() => {
+    if (!enableSpeech) {
+      stopActiveSpeech();
+    }
+  }, [enableSpeech]);
+
+  async function playTranslationAudio(text: string) {
+    const spokenText = text.trim();
+    if (!spokenText || !enableSpeechRef.current) {
+      return;
+    }
+
+    const activeProvider = providerRef.current;
+    const activeTargetLanguage = targetLanguageRef.current;
+
+    if (
+      !activeProvider ||
+      typeof window === "undefined" ||
+      typeof Audio === "undefined" ||
+      typeof URL.createObjectURL !== "function"
+    ) {
+      speakTranslation(spokenText, activeTargetLanguage);
+      return;
+    }
+
+    const requestId = speechRequestRef.current + 1;
+    speechRequestRef.current = requestId;
+    speechAbortControllerRef.current?.abort();
+    releaseActiveAudio();
+    stopBrowserSpeechSynthesis();
+
+    const abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+    speechAbortControllerRef.current = abortController;
+
+    let timeoutId: number | null = null;
+    const requestPromise = fetch("/api/realtime/speak", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: activeProvider,
+        targetLanguage: activeTargetLanguage,
+        text: spokenText,
+      }),
+      signal: abortController?.signal,
+    })
+      .then((response) => ({ kind: "response" as const, response }))
+      .catch((error: unknown) => ({ kind: "error" as const, error }));
+
+    const timeoutPromise = new Promise<{ kind: "timeout" }>((resolve) => {
+      timeoutId = window.setTimeout(() => {
+        resolve({ kind: "timeout" });
+      }, speechStartTimeoutMs);
+    });
+
+    const settleTimeout = () => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+
+    const fallbackToBrowserSpeech = () => {
+      abortController?.abort();
+      if (speechAbortControllerRef.current === abortController) {
+        speechAbortControllerRef.current = null;
+      }
+      if (requestId !== speechRequestRef.current) {
+        return;
+      }
+      releaseActiveAudio();
+      speakTranslation(spokenText, activeTargetLanguage);
+    };
+
+    try {
+      const outcome = await Promise.race([requestPromise, timeoutPromise]);
+      settleTimeout();
+
+      if (outcome.kind === "timeout") {
+        fallbackToBrowserSpeech();
+        return;
+      }
+
+      if (outcome.kind === "error") {
+        if (isAbortError(outcome.error)) {
+          return;
+        }
+        fallbackToBrowserSpeech();
+        return;
+      }
+
+      if (!outcome.response.ok) {
+        void readSpeechErrorResponse(outcome.response);
+        fallbackToBrowserSpeech();
+        return;
+      }
+
+      const audioUrl = URL.createObjectURL(await outcome.response.blob());
+
+      if (speechAbortControllerRef.current === abortController) {
+        speechAbortControllerRef.current = null;
+      }
+
+      if (requestId !== speechRequestRef.current) {
+        abortController?.abort();
+        if (typeof URL.revokeObjectURL === "function") {
+          URL.revokeObjectURL(audioUrl);
+        }
+        return;
+      }
+
+      const audio = new Audio(audioUrl);
+      audio.preload = "auto";
+
+      const clearCurrentAudio = () => {
+        if (audioRef.current === audio) {
+          audioRef.current = null;
+        }
+
+        if (audioUrlRef.current === audioUrl) {
+          if (typeof URL.revokeObjectURL === "function") {
+            URL.revokeObjectURL(audioUrl);
+          }
+          audioUrlRef.current = null;
+        }
+      };
+
+      audio.onended = clearCurrentAudio;
+      audio.onerror = clearCurrentAudio;
+      audioRef.current = audio;
+      audioUrlRef.current = audioUrl;
+
+      await audio.play();
+    } catch (error) {
+      settleTimeout();
+      if (isAbortError(error) || requestId !== speechRequestRef.current) {
+        return;
+      }
+
+      fallbackToBrowserSpeech();
+    }
+  }
 
   if (!clientRef.current) {
     clientRef.current = clientFactory({
@@ -180,6 +558,10 @@ export function TranslatorApp({
             text: payload.text,
           });
         });
+
+        if (enableSpeechRef.current) {
+          void playTranslationAudio(payload.text);
+        }
       },
       onResponseDone(payload) {
         startTransition(() => {
@@ -199,11 +581,20 @@ export function TranslatorApp({
   const isConnected = state.connectionStatus === "connected";
 
   useEffect(() => {
-    clientRef.current?.updateSettings(settings);
-  }, [targetLanguage, sourceLanguageMode, sourceLanguage]);
+    if (!provider) {
+      return;
+    }
+
+    clientRef.current?.updateSettings({
+      provider,
+      targetLanguage,
+      sourceLanguageMode,
+      sourceLanguage,
+    });
+  }, [provider, targetLanguage, sourceLanguageMode, sourceLanguage]);
 
   useEffect(() => {
-    if (state.connectionStatus !== "connected" || !nextQueuedTurnId) {
+    if (!settings || state.connectionStatus !== "connected" || !nextQueuedTurnId) {
       return;
     }
 
@@ -218,13 +609,7 @@ export function TranslatorApp({
         message,
       });
     }
-  }, [
-    nextQueuedTurnId,
-    state.connectionStatus,
-    targetLanguage,
-    sourceLanguageMode,
-    sourceLanguage,
-  ]);
+  }, [nextQueuedTurnId, provider, targetLanguage, sourceLanguageMode, sourceLanguage, state.connectionStatus]);
 
   useEffect(() => {
     if (!copyMessage) {
@@ -242,6 +627,7 @@ export function TranslatorApp({
 
   useEffect(() => {
     return () => {
+      stopActiveSpeech();
       clientRef.current?.disconnect();
     };
   }, []);
@@ -249,6 +635,14 @@ export function TranslatorApp({
   async function handleStart() {
     dispatch({ type: "error/set", message: null });
     dispatch({ type: "rate-limit/set", message: null });
+
+    if (!settings) {
+      dispatch({
+        type: "error/set",
+        message: "No supported realtime provider is configured on the server yet.",
+      });
+      return;
+    }
 
     try {
       await clientRef.current?.connect({ settings });
@@ -260,10 +654,20 @@ export function TranslatorApp({
   }
 
   function handleStop() {
+    stopActiveSpeech();
     clientRef.current?.disconnect();
   }
 
   async function handleResetSession() {
+    if (!settings) {
+      dispatch({
+        type: "error/set",
+        message: "No supported realtime provider is configured on the server yet.",
+      });
+      return;
+    }
+
+    stopActiveSpeech();
     clientRef.current?.disconnect();
     dispatch({ type: "reset" });
 
@@ -306,8 +710,8 @@ export function TranslatorApp({
         <p className="eyebrow">Realtime speech interpreter</p>
         <h1>Transcribe the source voice and translate it live in one session.</h1>
         <p className="hero-copy">
-          WebRTC keeps the browser low-latency, an ephemeral key keeps the API key off
-          the client, and the UI stays session-local so you can reset instantly.
+          The app automatically uses whichever realtime provider is configured on the
+          server, keeps the API keys off the client, and lets you reset the session instantly.
         </p>
       </section>
 
@@ -359,9 +763,18 @@ export function TranslatorApp({
           </label>
         </div>
 
+        <label className="status-note">
+          <input
+            checked={enableSpeech}
+            onChange={(event) => setEnableSpeech(event.target.checked)}
+            type="checkbox"
+          />{" "}
+          Speak translation aloud
+        </label>
+
         <div className="button-row">
           {!isConnected ? (
-            <button className="primary-button" onClick={handleStart} type="button">
+            <button className="primary-button" disabled={!settings} onClick={handleStart} type="button">
               Start listening
             </button>
           ) : (
@@ -383,12 +796,11 @@ export function TranslatorApp({
             {getConnectionLabel(state.connectionStatus)}
           </span>
           <span className="status-note">
+            Backend: {getProviderLabel(provider)}
+            {" | "}
             Target: {getLanguageLabel(targetLanguage)}
             {" | "}
-            Source:{" "}
-            {sourceLanguageMode === "manual"
-              ? getLanguageLabel(sourceLanguage)
-              : "Auto detect"}
+            Source: {sourceLanguageMode === "manual" ? getLanguageLabel(sourceLanguage) : "Auto detect"}
           </span>
           {copyMessage ? <span className="status-note">{copyMessage}</span> : null}
         </div>
@@ -480,3 +892,6 @@ export function TranslatorApp({
     </main>
   );
 }
+
+
+
