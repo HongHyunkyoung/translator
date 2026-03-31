@@ -153,7 +153,7 @@ export function buildRealtimeSessionConfig(
           create_response: false,
           interrupt_response: false,
           prefix_padding_ms: 300,
-          silence_duration_ms: 550,
+          silence_duration_ms: 320,
         },
       },
     },
@@ -172,7 +172,7 @@ export function buildGeminiLiveSessionConfig(): GeminiLiveSessionConfig {
     realtimeInputConfig: {
       automaticActivityDetection: {
         prefixPaddingMs: 300,
-        silenceDurationMs: 550,
+        silenceDurationMs: 320,
       },
     },
     systemInstruction: {
@@ -195,3 +195,4 @@ export function buildClientSecretRequest(settings: TranslatorSettings): ClientSe
     session: buildRealtimeSessionConfig(settings),
   };
 }
+
