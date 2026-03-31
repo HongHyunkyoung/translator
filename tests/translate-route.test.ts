@@ -124,10 +124,11 @@ describe("POST /api/realtime/translate", () => {
 
     expect(generateContentMock).toHaveBeenCalledWith({
       model: "gemini-translation-custom",
-      contents: "Hello",
+      contents: expect.stringContaining('Translate the quoted source utterance into the requested target language.'),
       config: expect.objectContaining({
-        temperature: 0.2,
+        temperature: 0,
       }),
     });
+    expect(String(generateContentMock.mock.calls[0]?.[0]?.contents)).toContain('"""Hello"""');
   });
 });
