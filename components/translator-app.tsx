@@ -126,9 +126,6 @@ function countScriptMatches(text: string, pattern: RegExp) {
   return (text.match(pattern) ?? []).length;
 }
 
-const QUESTION_START_PATTERN = /^(are|is|am|was|were|do|does|did|can|could|would|will|should|have|has|had|what|when|where|why|how|who|whom|whose|which)\b/i;
-const ASSISTANT_DIRECTED_PATTERN = /\b(you|your|translate|say|tell|answer|listen|hearing|hear|help)\b/i;
-
 function shouldReuseTranscriptAsTranslation(
   transcript: string,
   targetLanguage: string,
@@ -151,36 +148,6 @@ function shouldReuseTranscriptAsTranslation(
   const hangulCount = countScriptMatches(normalizedTranscript, /[\uAC00-\uD7A3]/g);
   const latinCount = countScriptMatches(normalizedTranscript, /[A-Za-z]/g);
   return hangulCount >= 2 && hangulCount >= latinCount;
-}
-
-function shouldPreferDeterministicTranslationRoute(
-  transcript: string,
-  settings: TranslatorSettings,
-) {
-  if (settings.provider !== "openai") {
-    return false;
-  }
-
-  const normalizedTranscript = transcript.trim();
-  if (!normalizedTranscript) {
-    return false;
-  }
-
-  return QUESTION_START_PATTERN.test(normalizedTranscript) || ASSISTANT_DIRECTED_PATTERN.test(normalizedTranscript);
-}
-
-async function readTranslationErrorResponse(response: Response) {
-  const text = await response.text();
-  if (!text) {
-    return `Translation route returned ${response.status}.`;
-  }
-
-  try {
-    const payload = JSON.parse(text) as { error?: unknown };
-    return typeof payload.error === "string" && payload.error ? payload.error : text;
-  } catch {
-    return text;
-  }
 }
 
 function clampLevel(level: number) {
@@ -543,61 +510,6 @@ export function TranslatorApp({
     void playTranslationAudio(text);
   }
 
-  async function requestDeterministicTranslation(
-    itemId: string,
-    transcript: string,
-    activeSettings: TranslatorSettings,
-  ) {
-    try {
-      const response = await fetch("/api/realtime/translate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          provider: activeSettings.provider,
-          transcript,
-          settings: activeSettings,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(await readTranslationErrorResponse(response));
-      }
-
-      const payload = (await response.json()) as { text?: unknown };
-      const translatedText = typeof payload.text === "string" ? payload.text.trim() : "";
-      if (!translatedText) {
-        throw new Error("The translation route did not return translated text.");
-      }
-
-      startTransition(() => {
-        dispatch({
-          type: "translation/outputDone",
-          itemId,
-          text: translatedText,
-        });
-        dispatch({
-          type: "translation/responseDone",
-          itemId,
-          failedMessage: null,
-        });
-      });
-
-      if (enableSpeechRef.current) {
-        void playTranslationAudio(translatedText);
-      }
-    } catch (error) {
-      startTransition(() => {
-        dispatch({
-          type: "translation/error",
-          itemId,
-          message: describeError(error),
-        });
-      });
-    }
-  }
-
   async function playTranslationAudio(text: string) {
     const spokenText = text.trim();
     if (!spokenText || !enableSpeechRef.current) {
@@ -934,12 +846,6 @@ export function TranslatorApp({
 
     try {
       dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
-
-      if (shouldPreferDeterministicTranslationRoute(queuedTranscript, settings)) {
-        void requestDeterministicTranslation(nextQueuedTurnId, queuedTranscript, settings);
-        return;
-      }
-
       clientRef.current?.requestTranslation(nextQueuedTurnId, settings, {
         enableAudio: settings.provider === "openai" ? enableSpeechRef.current : false,
       });

@@ -369,65 +369,6 @@ describe("TranslatorApp", () => {
     expect(await screen.findByText("Transcript copied.")).toBeInTheDocument();
   });
 
-  it("uses the deterministic translation route for assistant-directed OpenAI questions", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ text: "\uC9C0\uAE08 \uB4E3\uACE0 \uC788\uB098\uC694?" }), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const { callbacks, client, user } = renderTranslatorApp("openai");
-
-    await waitFor(() => {
-      expect(client.updateSettings).toHaveBeenCalled();
-    });
-
-    await user.selectOptions(screen.getByLabelText("To language"), "ko");
-    await user.click(
-      screen.getByRole("checkbox", {
-        name: "Automatically play translated speech",
-      }),
-    );
-
-    act(() => {
-      callbacks.onConnectionStatus("connected");
-      callbacks.onTurnCommitted({
-        itemId: "turn-openai-question",
-        previousItemId: null,
-        sourceLanguage: "en",
-      });
-      callbacks.onTranscriptCompleted({
-        itemId: "turn-openai-question",
-        transcript: "Are you listening right now?",
-      });
-    });
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/realtime/translate",
-        expect.objectContaining({
-          method: "POST",
-        }),
-      );
-    });
-
-    expect(client.requestTranslation).not.toHaveBeenCalled();
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      provider: "openai",
-      transcript: "Are you listening right now?",
-      settings: {
-        provider: "openai",
-        targetLanguage: "ko",
-        sourceLanguageMode: "auto",
-        sourceLanguage: "en",
-      },
-    });
-    expect(await screen.findByText("\uC9C0\uAE08 \uB4E3\uACE0 \uC788\uB098\uC694?")).toBeInTheDocument();
-  });
-
   it("uses OpenAI realtime audio for automatic playback instead of the speak route", async () => {
     const { fetchMock } = installAudioPlaybackMocks();
     const { callbacks, client } = renderTranslatorApp("openai");
