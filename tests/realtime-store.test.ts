@@ -20,7 +20,7 @@ describe("translatorReducer", () => {
     state = translatorReducer(state, {
       type: "turn/transcriptCompleted",
       itemId: "turn-1",
-      transcript: "¾È³çÇÏ¼¼¿ä",
+      transcript: "\uC548\uB155\uD558\uC138\uC694",
     });
 
     expect(getNextQueuedTurnId(state)).toBe("turn-1");
@@ -50,7 +50,7 @@ describe("translatorReducer", () => {
     });
 
     const [turn] = selectOrderedTurns(state);
-    expect(turn.transcriptFinal).toBe("¾È³çÇÏ¼¼¿ä");
+    expect(turn.transcriptFinal).toBe("\uC548\uB155\uD558\uC138\uC694");
     expect(turn.translationFinal).toBe("Hello.");
     expect(turn.status).toBe("done");
     expect(getNextQueuedTurnId(state)).toBeNull();
@@ -73,6 +73,29 @@ describe("translatorReducer", () => {
 
     expect(selectOrderedTurns(state)).toEqual([]);
     expect(state.turnsById).toEqual({});
+  });
+
+  it("prunes empty placeholder turns when the session goes idle", () => {
+    let state = translatorReducer(initialTranslatorState, {
+      type: "turn/committed",
+      itemId: "turn-pending",
+      previousItemId: null,
+      sourceLanguage: null,
+      createdAt: 25,
+    });
+
+    state = translatorReducer(state, {
+      type: "rate-limit/set",
+      message: "Realtime usage is getting close to the limit. Resets in 5s.",
+    });
+    state = translatorReducer(state, {
+      type: "connection/status",
+      status: "idle",
+    });
+
+    expect(selectOrderedTurns(state)).toEqual([]);
+    expect(state.turnsById).toEqual({});
+    expect(state.rateLimitMessage).toBeNull();
   });
 
   it("keeps turns ordered by creation time for rendering", () => {

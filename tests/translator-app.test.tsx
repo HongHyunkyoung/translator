@@ -431,6 +431,49 @@ describe("TranslatorApp", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/TTS quota exceeded\./i)).toBeInTheDocument();
   });
+  it("reuses the transcript when Korean speech is already in Korean", async () => {
+    const { user, callbacks, client } = renderTranslatorApp("openai");
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenCalled();
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Automatically play translated speech" }),
+    );
+    await user.selectOptions(screen.getByLabelText("To language"), "ko");
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenLastCalledWith({
+        provider: "openai",
+        targetLanguage: "ko",
+        sourceLanguageMode: "auto",
+        sourceLanguage: "en",
+      });
+    });
+
+    act(() => {
+      callbacks.onConnectionStatus("connected");
+      callbacks.onTurnCommitted({
+        itemId: "turn-ko-direct",
+        previousItemId: null,
+        sourceLanguage: null,
+      });
+      callbacks.onTranscriptCompleted({
+        itemId: "turn-ko-direct",
+        transcript: "\uD55C\uAD6D\uB9D0\uB85C \uD558\uBA74 \uD55C\uAD6D\uB9D0\uB85C \uD574\uC11D\uD558\uB0D0\uACE0.",
+      });
+    });
+
+    await waitFor(() => {
+      expect(client.requestTranslation).not.toHaveBeenCalled();
+    });
+
+    expect(
+      screen.getAllByText("\uD55C\uAD6D\uB9D0\uB85C \uD558\uBA74 \uD55C\uAD6D\uB9D0\uB85C \uD574\uC11D\uD558\uB0D0\uACE0."),
+    ).toHaveLength(2);
+  });
+
   it("disables automatic playback and hides replay controls when speech is turned off", async () => {
     const { speak } = installSpeechSynthesisMock();
     const { fetchMock, playMock } = installAudioPlaybackMocks();

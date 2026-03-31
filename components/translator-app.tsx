@@ -100,6 +100,34 @@ function getSourceSummary(sourceLanguageMode: SourceLanguageMode, sourceLanguage
   return sourceLanguageMode === "manual" ? getLanguageLabel(sourceLanguage) : "Auto detect";
 }
 
+function countScriptMatches(text: string, pattern: RegExp) {
+  return (text.match(pattern) ?? []).length;
+}
+
+function shouldReuseTranscriptAsTranslation(
+  transcript: string,
+  targetLanguage: string,
+  sourceLanguageMode: SourceLanguageMode,
+  sourceLanguage: string,
+) {
+  const normalizedTranscript = transcript.trim();
+  if (!normalizedTranscript) {
+    return false;
+  }
+
+  if (sourceLanguageMode === "manual" && sourceLanguage === targetLanguage) {
+    return true;
+  }
+
+  if (targetLanguage !== "ko") {
+    return false;
+  }
+
+  const hangulCount = countScriptMatches(normalizedTranscript, /[\uAC00-\uD7A3]/g);
+  const latinCount = countScriptMatches(normalizedTranscript, /[A-Za-z]/g);
+  return hangulCount >= 2 && hangulCount >= latinCount;
+}
+
 function clampLevel(level: number) {
   return Math.max(0, Math.min(1, level));
 }
@@ -760,6 +788,36 @@ export function TranslatorApp({
       return;
     }
 
+    const queuedTurn = state.turnsById[nextQueuedTurnId];
+    const queuedTranscript = (queuedTurn?.transcriptFinal || queuedTurn?.transcriptDraft || "").trim();
+
+    if (
+      queuedTurn &&
+      shouldReuseTranscriptAsTranslation(
+        queuedTranscript,
+        targetLanguage,
+        sourceLanguageMode,
+        sourceLanguage,
+      )
+    ) {
+      dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
+      dispatch({
+        type: "translation/outputDone",
+        itemId: nextQueuedTurnId,
+        text: queuedTranscript,
+      });
+      dispatch({
+        type: "translation/responseDone",
+        itemId: nextQueuedTurnId,
+        failedMessage: null,
+      });
+
+      if (enableSpeechRef.current) {
+        void playTranslationAudio(queuedTranscript);
+      }
+      return;
+    }
+
     try {
       dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
       clientRef.current?.requestTranslation(nextQueuedTurnId, settings);
@@ -777,6 +835,7 @@ export function TranslatorApp({
     sourceLanguage,
     sourceLanguageMode,
     state.connectionStatus,
+    state.turnsById,
     targetLanguage,
   ]);
 

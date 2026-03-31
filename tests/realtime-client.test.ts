@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractGeminiServerEventText, mergeGeminiTranscript, parseGeminiServerEvent } from "@/lib/realtime-client";
+import {
+  formatRateLimitMessage,
+  extractGeminiServerEventText,
+  mergeGeminiTranscript,
+  parseGeminiServerEvent,
+} from "@/lib/realtime-client";
 
 describe("extractGeminiServerEventText", () => {
   it("returns JSON text frames", async () => {
@@ -17,7 +22,6 @@ describe("extractGeminiServerEventText", () => {
     await expect(extractGeminiServerEventText("binary-audio-frame")).resolves.toBeNull();
     await expect(extractGeminiServerEventText(new ArrayBuffer(8))).resolves.toBeNull();
   });
-
 
   it("recognizes Gemini turn completion signals", () => {
     expect(
@@ -50,5 +54,19 @@ describe("extractGeminiServerEventText", () => {
     await expect(
       extractGeminiServerEventText(new Blob([Uint8Array.from([0, 159, 255])])),
     ).resolves.toBeNull();
+  });
+});
+
+describe("formatRateLimitMessage", () => {
+  it("hides high remaining token counts from the UI", () => {
+    expect(
+      formatRateLimitMessage([{ name: "tokens", remaining: 39476, reset_seconds: 1 }]),
+    ).toBeNull();
+  });
+
+  it("shows a friendlier warning when the limit gets low", () => {
+    expect(
+      formatRateLimitMessage([{ name: "tokens", remaining: 1200, reset_seconds: 4.2 }]),
+    ).toBe("Realtime usage is getting close to the limit. Resets in 5s.");
   });
 });

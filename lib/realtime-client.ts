@@ -126,7 +126,9 @@ function normalizeErrorMessage(value: unknown) {
   return "The realtime provider returned an unexpected error.";
 }
 
-function formatRateLimitMessage(rateLimits: unknown) {
+const RATE_LIMIT_WARNING_THRESHOLD = 5000;
+
+export function formatRateLimitMessage(rateLimits: unknown) {
   if (!Array.isArray(rateLimits) || rateLimits.length === 0) {
     return null;
   }
@@ -145,18 +147,20 @@ function formatRateLimitMessage(rateLimits: unknown) {
       }
     | undefined;
 
-  if (!primary?.name) {
+  if (!primary?.name || typeof primary.remaining !== "number") {
     return null;
   }
 
-  const remaining =
-    typeof primary.remaining === "number" ? primary.remaining : "unknown";
+  if (primary.remaining > RATE_LIMIT_WARNING_THRESHOLD) {
+    return null;
+  }
+
   const resetSeconds =
     typeof primary.reset_seconds === "number"
       ? `${Math.ceil(primary.reset_seconds)}s`
       : "shortly";
 
-  return `${primary.name} remaining: ${remaining}. Resets in ${resetSeconds}.`;
+  return `Realtime usage is getting close to the limit. Resets in ${resetSeconds}.`;
 }
 
 function getStringValue(value: unknown) {

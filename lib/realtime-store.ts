@@ -139,6 +139,10 @@ function pruneEmptyTurn(state: TranslatorState, itemId: string) {
   };
 }
 
+function pruneAllEmptyTurns(state: TranslatorState) {
+  return state.orderedTurnIds.reduce((nextState, turnId) => pruneEmptyTurn(nextState, turnId), state);
+}
+
 function ensureTurn(
   state: TranslatorState,
   itemId: string,
@@ -196,11 +200,17 @@ export function translatorReducer(
   action: TranslatorAction,
 ): TranslatorState {
   switch (action.type) {
-    case "connection/status":
-      return {
+    case "connection/status": {
+      const nextState: TranslatorState = {
         ...state,
         connectionStatus: action.status,
+        rateLimitMessage: action.status === "connected" ? state.rateLimitMessage : null,
       };
+
+      return action.status === "idle" || action.status === "error"
+        ? pruneAllEmptyTurns(nextState)
+        : nextState;
+    }
     case "error/set":
       return {
         ...state,
