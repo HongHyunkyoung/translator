@@ -254,7 +254,7 @@ async function createOpenAISpeech(text: string, targetLanguage: string) {
         input: text,
         instructions: buildSpeechInstructions(targetLanguage),
         response_format: "wav",
-        speed: 0.96,
+        speed: 1.02,
       }),
       cache: "no-store",
     });

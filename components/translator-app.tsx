@@ -254,7 +254,7 @@ function speakTranslation(
   const utterance = new SpeechSynthesisUtterance(spokenText);
   const locale = getSpeechLocale(targetLanguage);
   utterance.lang = locale;
-  utterance.rate = 0.96;
+  utterance.rate = 1.02;
   utterance.pitch = 1;
   utterance.onend = () => {
     callbacks?.onEnd?.();

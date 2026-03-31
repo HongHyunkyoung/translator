@@ -59,7 +59,7 @@ export type RealtimeSessionConfig =
   | OpenAIRealtimeSessionConfig
   | GeminiLiveSessionConfig;
 
-const TURN_SILENCE_DURATION_MS = 180;
+const TURN_SILENCE_DURATION_MS = 150;
 
 export type ClientSecretRequest = {
   expires_after: {

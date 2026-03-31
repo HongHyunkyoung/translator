@@ -90,7 +90,7 @@ describe("realtime-config", () => {
             create_response: false,
             interrupt_response: false,
             prefix_padding_ms: 300,
-            silence_duration_ms: 180,
+            silence_duration_ms: 150,
           },
         },
       },
@@ -161,7 +161,7 @@ describe("realtime-config", () => {
       realtimeInputConfig: {
         automaticActivityDetection: {
           prefixPaddingMs: 300,
-          silenceDurationMs: 180,
+          silenceDurationMs: 150,
         },
       },
       systemInstruction: {

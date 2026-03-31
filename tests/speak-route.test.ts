@@ -209,7 +209,7 @@ describe("POST /api/realtime/speak", () => {
       voice: "marin",
       input: "Hello there",
       response_format: "wav",
-      speed: 0.96,
+      speed: 1.02,
     });
   });
 });
