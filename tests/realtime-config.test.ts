@@ -64,6 +64,7 @@ describe("realtime-config", () => {
       "Translate every completed user utterance into English.",
     );
     expect(buildTranslatorInstructions(settings)).toContain("The speaker will use Korean.");
+    expect(buildTranslatorInstructions(settings)).toContain("All output must be entirely in English. Never repeat the source language unless the source and target languages are the same.");
     expect(buildTranslatorInstructions(settings)).toContain(
       "Make the translation sound natural, conversational, and native",
     );
@@ -132,6 +133,9 @@ describe("realtime-config", () => {
     );
     expect(instructions).toContain(
       "Do not reply with assistant-like Korean such as \"\uBB3C\uB860\uC774\uC8E0\", \"\uBC88\uC5ED\uD574 \uB4DC\uB9AC\uACA0\uC2B5\uB2C8\uB2E4\", \"\uB9D0\uC500\uD574 \uC8FC\uC138\uC694\", or \"\uBB50\uB97C \uBC88\uC5ED\uD574\uB4DC\uB9B4\uAE4C\uC694\" unless those meanings are explicitly present in the source utterance.",
+    );
+    expect(instructions).toContain(
+      "The final response itself must be in Korean. Do not speak or write the source English sentence back in English.",
     );
   });
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  formatRateLimitMessage,
   extractGeminiServerEventText,
+  extractOpenAIResponseText,
+  formatRateLimitMessage,
   mergeGeminiTranscript,
   parseGeminiServerEvent,
 } from "@/lib/realtime-client";
@@ -54,6 +55,25 @@ describe("extractGeminiServerEventText", () => {
     await expect(
       extractGeminiServerEventText(new Blob([Uint8Array.from([0, 159, 255])])),
     ).resolves.toBeNull();
+  });
+});
+
+describe("extractOpenAIResponseText", () => {
+  it("reads transcript text from audio output parts", () => {
+    expect(
+      extractOpenAIResponseText({
+        output: [
+          {
+            content: [
+              {
+                type: "audio",
+                transcript: "\uC9C0\uAE08 \uBC14\uB85C \uC791\uB3D9\uD560\uAE4C?",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe("\uC9C0\uAE08 \uBC14\uB85C \uC791\uB3D9\uD560\uAE4C?");
   });
 });
 

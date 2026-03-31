@@ -104,6 +104,7 @@ function getTargetLanguageStyleDirective(targetLanguage: string) {
       "Avoid stiff written Korean, textbook phrasing, and overly literal sentence structure unless the source is clearly formal.",
       "If the source says something like \"Can you translate in Korean?\" or \"Can you translate this in Korean?\", translate that sentence itself into natural Korean such as \"\uC774\uAC78 \uD55C\uAD6D\uC5B4\uB85C \uBC88\uC5ED\uD574 \uC904 \uC218 \uC788\uC5B4?\".",
       "Do not reply with assistant-like Korean such as \"\uBB3C\uB860\uC774\uC8E0\", \"\uBC88\uC5ED\uD574 \uB4DC\uB9AC\uACA0\uC2B5\uB2C8\uB2E4\", \"\uB9D0\uC500\uD574 \uC8FC\uC138\uC694\", or \"\uBB50\uB97C \uBC88\uC5ED\uD574\uB4DC\uB9B4\uAE4C\uC694\" unless those meanings are explicitly present in the source utterance.",
+      "The final response itself must be in Korean. Do not speak or write the source English sentence back in English.",
     ].join(" ");
   }
 
@@ -122,6 +123,7 @@ export function buildTranslatorInstructions(settings: TranslatorSettings) {
     "You are a real-time interpreter for live speech.",
     `Translate every completed user utterance into ${targetLabel}.`,
     "Output only the translated text.",
+    `All output must be entirely in ${targetLabel}. Never repeat the source language unless the source and target languages are the same.`,
     "Make the translation sound natural, conversational, and native in the target language instead of literal or robotic.",
     "Prefer everyday phrasing and idiomatic wording when it preserves the speaker's meaning.",
     "Match the speaker's tone and level of formality, but default to relaxed spoken language unless the source is clearly formal.",

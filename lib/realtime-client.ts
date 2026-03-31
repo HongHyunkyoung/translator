@@ -176,6 +176,41 @@ function getStringValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
 }
 
+function extractOpenAIContentPartText(part: unknown) {
+  if (typeof part !== "object" || !part) {
+    return null;
+  }
+
+  const candidate = part as { type?: unknown; text?: unknown; transcript?: unknown };
+  const transcript = getStringValue(candidate.transcript)?.trim();
+  if (transcript) {
+    return transcript;
+  }
+
+  const text = getStringValue(candidate.text)?.trim();
+  return text || null;
+}
+
+export function extractOpenAIResponseText(response: unknown) {
+  if (typeof response !== "object" || !response) {
+    return null;
+  }
+
+  const outputs = "output" in response && Array.isArray(response.output) ? response.output : [];
+  const parts = outputs.flatMap((output) =>
+    typeof output === "object" && output && "content" in output && Array.isArray(output.content)
+      ? output.content
+      : [],
+  );
+  const text = parts
+    .map((part) => extractOpenAIContentPartText(part))
+    .filter((value): value is string => Boolean(value))
+    .join("\n")
+    .trim();
+
+  return text || null;
+}
+
 export async function extractGeminiServerEventText(rawData: unknown) {
   if (typeof rawData === "string") {
     return rawData.trimStart().startsWith("{") ? rawData : null;
@@ -760,6 +795,20 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
           text: getStringValue(event.text) ?? "",
         });
         break;
+      case "response.output_audio_transcript.delta":
+        this.callbacks.onTranslationDelta({
+          responseId: getStringValue(event.response_id),
+          itemId: this.pendingTranslationTurnId ?? undefined,
+          delta: getStringValue(event.delta) ?? "",
+        });
+        break;
+      case "response.output_audio_transcript.done":
+        this.callbacks.onTranslationOutputDone({
+          responseId: getStringValue(event.response_id),
+          itemId: this.pendingTranslationTurnId ?? undefined,
+          text: getStringValue(event.transcript) ?? "",
+        });
+        break;
       case "response.output_audio.delta":
         this.handleOutputAudioPlaybackStarted(getStringValue(event.response_id));
         break;
@@ -780,6 +829,15 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
                 "status_details" in response ? response.status_details : undefined,
               )
             : null;
+        const fallbackTranslationText = failedMessage ? null : extractOpenAIResponseText(response);
+
+        if (fallbackTranslationText) {
+          this.callbacks.onTranslationOutputDone({
+            responseId,
+            itemId: this.pendingTranslationTurnId ?? undefined,
+            text: fallbackTranslationText,
+          });
+        }
 
         this.callbacks.onResponseDone({
           responseId,
