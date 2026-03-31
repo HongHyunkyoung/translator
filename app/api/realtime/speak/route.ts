@@ -32,7 +32,11 @@ function getGeminiTtsModel() {
   return process.env.GEMINI_TTS_MODEL ?? "gemini-2.5-flash-preview-tts";
 }
 
-function getGeminiTtsVoice() {
+function getGeminiTtsVoice(targetLanguage: string) {
+  if (targetLanguage === "ko") {
+    return process.env.GEMINI_TTS_VOICE_KO ?? process.env.GEMINI_TTS_VOICE ?? "Despina";
+  }
+
   return process.env.GEMINI_TTS_VOICE ?? "Achird";
 }
 
@@ -69,23 +73,44 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function normalizeSpeechText(text: string) {
+  return text.replace(/\s*\n+\s*/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
 function buildSpeechInstructions(targetLanguage: string) {
   const targetLabel = getLanguageLabel(targetLanguage);
+  const localeSpecificInstruction =
+    targetLanguage === "ko"
+      ? "Speak in fluent everyday Korean with soft connected phrasing and natural polite endings. Avoid choppy syllables, textbook diction, overly formal narration, or flat robotic pacing. Use realistic pauses between meaning units so the speech feels like a real interpreter speaking to one listener."
+      : null;
 
   return [
     `Speak in natural, idiomatic ${targetLabel}.`,
     "Sound warm, human, and conversational rather than robotic.",
     "Use smooth pacing like a professional interpreter.",
     "Read only the provided translated text and do not add extra words.",
-  ].join(" ");
+    localeSpecificInstruction,
+  ]
+    .filter((instruction): instruction is string => Boolean(instruction))
+    .join(" ");
 }
 
 function buildGeminiSpeechPrompt(text: string, targetLanguage: string) {
+  const normalizedText = normalizeSpeechText(text);
+  const localeSpecificLeadIn =
+    targetLanguage === "ko"
+      ? "Read the Korean translation like natural spoken interpretation for a live listener. Keep the wording and meaning, but use gentle connected phrasing and realistic pauses."
+      : null;
+
   return [
     buildSpeechInstructions(targetLanguage),
-    "Translated text:",
-    text,
-  ].join("\n\n");
+    localeSpecificLeadIn,
+    "Read the following translated text aloud exactly once.",
+    "Text to read:",
+    `\"\"\"${normalizedText}\"\"\"`,
+  ]
+    .filter((instruction): instruction is string => Boolean(instruction))
+    .join("\n\n");
 }
 
 function createWavFile(
@@ -172,7 +197,7 @@ async function createGeminiSpeech(text: string, targetLanguage: string) {
           languageCode: getSpeechLocale(targetLanguage),
           voiceConfig: {
             prebuiltVoiceConfig: {
-              voiceName: getGeminiTtsVoice(),
+              voiceName: getGeminiTtsVoice(targetLanguage),
             },
           },
         },
@@ -229,7 +254,7 @@ async function createOpenAISpeech(text: string, targetLanguage: string) {
         input: text,
         instructions: buildSpeechInstructions(targetLanguage),
         response_format: "wav",
-        speed: 0.96,
+        speed: 1.02,
       }),
       cache: "no-store",
     });

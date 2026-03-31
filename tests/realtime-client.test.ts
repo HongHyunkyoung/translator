@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { extractGeminiServerEventText, mergeGeminiTranscript, parseGeminiServerEvent } from "@/lib/realtime-client";
+import {
+  extractGeminiServerEventText,
+  extractOpenAIResponseText,
+  formatRateLimitMessage,
+  mergeGeminiTranscript,
+  parseGeminiServerEvent,
+} from "@/lib/realtime-client";
 
 describe("extractGeminiServerEventText", () => {
   it("returns JSON text frames", async () => {
@@ -17,7 +23,6 @@ describe("extractGeminiServerEventText", () => {
     await expect(extractGeminiServerEventText("binary-audio-frame")).resolves.toBeNull();
     await expect(extractGeminiServerEventText(new ArrayBuffer(8))).resolves.toBeNull();
   });
-
 
   it("recognizes Gemini turn completion signals", () => {
     expect(
@@ -50,5 +55,38 @@ describe("extractGeminiServerEventText", () => {
     await expect(
       extractGeminiServerEventText(new Blob([Uint8Array.from([0, 159, 255])])),
     ).resolves.toBeNull();
+  });
+});
+
+describe("extractOpenAIResponseText", () => {
+  it("reads transcript text from audio output parts", () => {
+    expect(
+      extractOpenAIResponseText({
+        output: [
+          {
+            content: [
+              {
+                type: "audio",
+                transcript: "\uC9C0\uAE08 \uBC14\uB85C \uC791\uB3D9\uD560\uAE4C?",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe("\uC9C0\uAE08 \uBC14\uB85C \uC791\uB3D9\uD560\uAE4C?");
+  });
+});
+
+describe("formatRateLimitMessage", () => {
+  it("hides high remaining token counts from the UI", () => {
+    expect(
+      formatRateLimitMessage([{ name: "tokens", remaining: 39476, reset_seconds: 1 }]),
+    ).toBeNull();
+  });
+
+  it("shows a friendlier warning when the limit gets low", () => {
+    expect(
+      formatRateLimitMessage([{ name: "tokens", remaining: 1200, reset_seconds: 4.2 }]),
+    ).toBe("Realtime usage is getting close to the limit. Resets in 5s.");
   });
 });

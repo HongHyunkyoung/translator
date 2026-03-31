@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { startTransition, useEffect, useReducer, useRef, useState } from "react";
 import {
@@ -43,7 +43,7 @@ const MICROPHONE_ICON = "\uD83C\uDFA4";
 const SPEAKER_ICON = "\uD83D\uDD0A";
 const TITLE_DIVIDER = "\u2192";
 const MICROPHONE_LEVEL_LABEL = "Microphone input level";
-const SERVER_TTS_START_TIMEOUT_MS = 250;
+const SERVER_TTS_START_TIMEOUT_MS = 1600;
 
 async function resolveProviderFromServer(): Promise<RealtimeProvider> {
   const response = await fetch("/api/realtime/provider", {
@@ -85,6 +85,28 @@ function getTurnBodyText(turn: TranslationTurn, kind: "transcript" | "translatio
   return turn.translationFinal || turn.translationDraft;
 }
 
+function getTranscriptDisplayText(turn: TranslationTurn) {
+  const transcriptText = getTurnBodyText(turn, "transcript").trim();
+  if (transcriptText) {
+    return transcriptText;
+  }
+
+  return turn.status === "transcribing" ? "Listening for speech..." : "Transcript unavailable.";
+}
+
+function getTranslationDisplayText(turn: TranslationTurn) {
+  const translationText = getTurnBodyText(turn, "translation").trim();
+  if (translationText) {
+    return translationText;
+  }
+
+  if (turn.status === "error") {
+    return turn.error || "Translation failed.";
+  }
+
+  return turn.status === "done" ? "Translation unavailable." : "Waiting for translated text...";
+}
+
 function buildCopyBlock(turns: TranslationTurn[], kind: "transcript" | "translation") {
   return turns
     .map((turn) => getTurnBodyText(turn, kind).trim())
@@ -98,6 +120,34 @@ function getSpeechLocale(targetLanguage: string) {
 
 function getSourceSummary(sourceLanguageMode: SourceLanguageMode, sourceLanguage: string) {
   return sourceLanguageMode === "manual" ? getLanguageLabel(sourceLanguage) : "Auto detect";
+}
+
+function countScriptMatches(text: string, pattern: RegExp) {
+  return (text.match(pattern) ?? []).length;
+}
+
+function shouldReuseTranscriptAsTranslation(
+  transcript: string,
+  targetLanguage: string,
+  sourceLanguageMode: SourceLanguageMode,
+  sourceLanguage: string,
+) {
+  const normalizedTranscript = transcript.trim();
+  if (!normalizedTranscript) {
+    return false;
+  }
+
+  if (sourceLanguageMode === "manual" && sourceLanguage === targetLanguage) {
+    return true;
+  }
+
+  if (targetLanguage !== "ko") {
+    return false;
+  }
+
+  const hangulCount = countScriptMatches(normalizedTranscript, /[\uAC00-\uD7A3]/g);
+  const latinCount = countScriptMatches(normalizedTranscript, /[A-Za-z]/g);
+  return hangulCount >= 2 && hangulCount >= latinCount;
 }
 
 function clampLevel(level: number) {
@@ -131,6 +181,76 @@ async function readSpeechErrorResponse(response: Response) {
   } catch {
     return text;
   }
+}
+
+async function readTranslationErrorResponse(response: Response) {
+  const text = await response.text();
+  if (!text) {
+    return `Translation route returned ${response.status}.`;
+  }
+
+  try {
+    const payload = JSON.parse(text) as { error?: unknown };
+    return typeof payload.error === "string" && payload.error ? payload.error : text;
+  } catch {
+    return text;
+  }
+}
+
+function extractRateLimitRetryAfterMs(message: string) {
+  const retryMatch = message.match(/try again in\s+(\d+)\s*(ms|s|sec|secs|seconds|m|min|mins|minutes)/i);
+  if (!retryMatch) {
+    return null;
+  }
+
+  const amount = Number.parseInt(retryMatch[1] ?? "", 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return null;
+  }
+
+  const unit = (retryMatch[2] ?? "s").toLowerCase();
+  if (unit === "ms") {
+    return amount;
+  }
+
+  if (unit.startsWith("m")) {
+    return amount * 60_000;
+  }
+
+  return amount * 1_000;
+}
+
+function formatRetryAfterLabel(retryAfterMs: number) {
+  const totalSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+  if (totalSeconds >= 60) {
+    const minutes = Math.ceil(totalSeconds / 60);
+    return `${minutes}m`;
+  }
+
+  return `${totalSeconds}s`;
+}
+
+function normalizeProviderRateLimitMessage(
+  message: string,
+  provider: RealtimeProvider,
+  kind: "translation" | "speech",
+) {
+  const retryAfterMs = extractRateLimitRetryAfterMs(message);
+  if (!/rate limit/i.test(message) && retryAfterMs === null) {
+    return {
+      message,
+      retryAfterMs: null,
+    };
+  }
+
+  const providerLabel = provider === "openai" ? "OpenAI" : "Gemini";
+  const actionLabel = kind === "speech" ? "speech" : "translation";
+  const retryLabel = retryAfterMs !== null ? ` Try again in ${formatRetryAfterLabel(retryAfterMs)}.` : "";
+
+  return {
+    message: `${providerLabel} ${actionLabel} is temporarily rate limited.${retryLabel}`,
+    retryAfterMs,
+  };
 }
 
 function canUseBrowserSpeechSynthesis() {
@@ -226,7 +346,7 @@ function speakTranslation(
   const utterance = new SpeechSynthesisUtterance(spokenText);
   const locale = getSpeechLocale(targetLanguage);
   utterance.lang = locale;
-  utterance.rate = 0.96;
+  utterance.rate = 1.02;
   utterance.pitch = 1;
   utterance.onend = () => {
     callbacks?.onEnd?.();
@@ -334,6 +454,7 @@ export function TranslatorApp({
   const [sourceLanguage, setSourceLanguage] = useState("en");
   const [enableSpeech, setEnableSpeech] = useState(true);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [speechMessage, setSpeechMessage] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [inputLevel, setInputLevel] = useState(0);
   const clientRef = useRef<TranslatorClient | null>(null);
@@ -344,6 +465,10 @@ export function TranslatorApp({
   const audioUrlRef = useRef<string | null>(null);
   const speechAbortControllerRef = useRef<AbortController | null>(null);
   const speechRequestRef = useRef(0);
+  const rateLimitCooldownsRef = useRef({
+    openaiSpeechUntil: 0,
+    openaiTranslationUntil: 0,
+  });
 
   const settings: TranslatorSettings | null = provider
     ? {
@@ -456,7 +581,95 @@ export function TranslatorApp({
     }
 
     stopActiveSpeech();
-    playBrowserTranslation(text, targetLanguageRef.current);
+    void playTranslationAudio(text);
+  }
+
+  async function requestServerTranslation(
+    itemId: string,
+    transcript: string,
+    activeSettings: TranslatorSettings,
+  ) {
+    if (activeSettings.provider === "openai") {
+      const retryAfterMs = rateLimitCooldownsRef.current.openaiTranslationUntil - Date.now();
+      if (retryAfterMs > 0) {
+        startTransition(() => {
+          dispatch({
+            type: "translation/error",
+            itemId,
+            message: normalizeProviderRateLimitMessage(
+              `Please try again in ${formatRetryAfterLabel(retryAfterMs)}.`,
+              "openai",
+              "translation",
+            ).message,
+          });
+        });
+        return;
+      }
+    }
+
+    try {
+      const response = await fetch("/api/realtime/translate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: activeSettings.provider,
+          transcript,
+          settings: activeSettings,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readTranslationErrorResponse(response));
+      }
+
+      const payload = (await response.json()) as { text?: unknown };
+      const translatedText = typeof payload.text === "string" ? payload.text.trim() : "";
+      if (!translatedText) {
+        throw new Error("The translation route did not return translated text.");
+      }
+
+      if (activeSettings.provider === "openai") {
+        rateLimitCooldownsRef.current.openaiTranslationUntil = 0;
+      }
+
+      startTransition(() => {
+        dispatch({
+          type: "translation/outputDone",
+          itemId,
+          text: translatedText,
+        });
+        dispatch({
+          type: "translation/responseDone",
+          itemId,
+          failedMessage: null,
+        });
+      });
+
+      if (enableSpeechRef.current) {
+        void playTranslationAudio(translatedText);
+      }
+    } catch (error) {
+      const normalizedMessage = describeError(error);
+      const rateLimitState = normalizeProviderRateLimitMessage(
+        normalizedMessage,
+        activeSettings.provider,
+        "translation",
+      );
+
+      if (activeSettings.provider === "openai" && rateLimitState.retryAfterMs !== null) {
+        rateLimitCooldownsRef.current.openaiTranslationUntil = Date.now() + rateLimitState.retryAfterMs;
+      }
+
+      startTransition(() => {
+        dispatch({
+          type: "translation/error",
+          itemId,
+          message: rateLimitState.message,
+        });
+      });
+    }
   }
 
   async function playTranslationAudio(text: string) {
@@ -468,6 +681,20 @@ export function TranslatorApp({
     const activeProvider = providerRef.current;
     const activeTargetLanguage = targetLanguageRef.current;
 
+    if (activeProvider === "openai") {
+      const retryAfterMs = rateLimitCooldownsRef.current.openaiSpeechUntil - Date.now();
+      if (retryAfterMs > 0) {
+        setSpeechMessage(
+          normalizeProviderRateLimitMessage(
+            `Please try again in ${formatRetryAfterLabel(retryAfterMs)}.`,
+            "openai",
+            "speech",
+          ).message,
+        );
+        return;
+      }
+    }
+
     if (
       !activeProvider ||
       typeof window === "undefined" ||
@@ -477,6 +704,8 @@ export function TranslatorApp({
       playBrowserTranslation(spokenText, activeTargetLanguage);
       return;
     }
+
+    setSpeechMessage(null);
 
     const requestId = speechRequestRef.current + 1;
     speechRequestRef.current = requestId;
@@ -489,6 +718,13 @@ export function TranslatorApp({
     speechAbortControllerRef.current = abortController;
 
     let timeoutId: number | null = null;
+    const timeoutWindowMs =
+      activeTargetLanguage === "ko"
+        ? Math.max(speechStartTimeoutMs, 3200)
+        : activeProvider === "gemini"
+          ? Math.max(speechStartTimeoutMs, 2200)
+          : speechStartTimeoutMs;
+
     const requestPromise = fetch("/api/realtime/speak", {
       method: "POST",
       headers: {
@@ -507,7 +743,7 @@ export function TranslatorApp({
     const timeoutPromise = new Promise<{ kind: "timeout" }>((resolve) => {
       timeoutId = window.setTimeout(() => {
         resolve({ kind: "timeout" });
-      }, speechStartTimeoutMs);
+      }, timeoutWindowMs);
     });
 
     const settleTimeout = () => {
@@ -517,7 +753,9 @@ export function TranslatorApp({
       }
     };
 
-    const fallbackToBrowserSpeech = () => {
+    const disableBrowserSpeechFallback = activeTargetLanguage === "ko";
+
+    const fallbackToBrowserSpeech = (reason?: string) => {
       abortController?.abort();
       if (speechAbortControllerRef.current === abortController) {
         speechAbortControllerRef.current = null;
@@ -527,6 +765,33 @@ export function TranslatorApp({
       }
       releaseActiveAudio();
       setIsSpeaking(false);
+
+      const rateLimitState = reason
+        ? normalizeProviderRateLimitMessage(reason, activeProvider, "speech")
+        : null;
+
+      const retryAfterMs = rateLimitState?.retryAfterMs;
+      if (activeProvider === "openai" && retryAfterMs !== null && retryAfterMs !== undefined) {
+        rateLimitCooldownsRef.current.openaiSpeechUntil = Date.now() + retryAfterMs;
+      }
+
+      const displayReason = rateLimitState?.message ?? reason;
+
+      if (disableBrowserSpeechFallback) {
+        setInputMuted(false);
+        setSpeechMessage(
+          displayReason
+            ? `Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice. ${displayReason}`
+            : "Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice.",
+        );
+        return;
+      }
+
+      setSpeechMessage(
+        displayReason
+          ? `Speech playback fell back to your browser voice. ${displayReason}`
+          : null,
+      );
       playBrowserTranslation(spokenText, activeTargetLanguage);
     };
 
@@ -535,7 +800,7 @@ export function TranslatorApp({
       settleTimeout();
 
       if (outcome.kind === "timeout") {
-        fallbackToBrowserSpeech();
+        fallbackToBrowserSpeech(`Speech generation timed out after ${timeoutWindowMs}ms.`);
         return;
       }
 
@@ -543,13 +808,13 @@ export function TranslatorApp({
         if (isAbortError(outcome.error)) {
           return;
         }
-        fallbackToBrowserSpeech();
+        fallbackToBrowserSpeech(describeError(outcome.error));
         return;
       }
 
       if (!outcome.response.ok) {
-        void readSpeechErrorResponse(outcome.response);
-        fallbackToBrowserSpeech();
+        const speechErrorMessage = await readSpeechErrorResponse(outcome.response);
+        fallbackToBrowserSpeech(speechErrorMessage);
         return;
       }
 
@@ -601,7 +866,7 @@ export function TranslatorApp({
       }
 
       setIsSpeaking(false);
-      fallbackToBrowserSpeech();
+      fallbackToBrowserSpeech(describeError(error));
     }
   }
 
@@ -624,6 +889,10 @@ export function TranslatorApp({
       },
       onInputLevel(level) {
         setInputLevel(clampLevel(level));
+      },
+      onOutputAudioStateChange(isPlaying) {
+        setSpeechMessage(null);
+        setIsSpeaking(isPlaying);
       },
       onTurnCommitted(payload) {
         startTransition(() => {
@@ -682,7 +951,7 @@ export function TranslatorApp({
           });
         });
 
-        if (enableSpeechRef.current) {
+        if (enableSpeechRef.current && providerRef.current !== "openai") {
           void playTranslationAudio(payload.text);
         }
       },
@@ -736,9 +1005,47 @@ export function TranslatorApp({
       return;
     }
 
+    const queuedTurn = state.turnsById[nextQueuedTurnId];
+    const queuedTranscript = (queuedTurn?.transcriptFinal || queuedTurn?.transcriptDraft || "").trim();
+
+    if (
+      queuedTurn &&
+      shouldReuseTranscriptAsTranslation(
+        queuedTranscript,
+        targetLanguage,
+        sourceLanguageMode,
+        sourceLanguage,
+      )
+    ) {
+      dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
+      dispatch({
+        type: "translation/outputDone",
+        itemId: nextQueuedTurnId,
+        text: queuedTranscript,
+      });
+      dispatch({
+        type: "translation/responseDone",
+        itemId: nextQueuedTurnId,
+        failedMessage: null,
+      });
+
+      if (enableSpeechRef.current) {
+        void playTranslationAudio(queuedTranscript);
+      }
+      return;
+    }
+
     try {
       dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
-      clientRef.current?.requestTranslation(nextQueuedTurnId, settings);
+
+      if (settings.provider === "openai") {
+        void requestServerTranslation(nextQueuedTurnId, queuedTranscript, settings);
+        return;
+      }
+
+      clientRef.current?.requestTranslation(nextQueuedTurnId, settings, {
+        enableAudio: false,
+      });
     } catch (error) {
       const message = describeError(error);
       dispatch({
@@ -753,6 +1060,7 @@ export function TranslatorApp({
     sourceLanguage,
     sourceLanguageMode,
     state.connectionStatus,
+    state.turnsById,
     targetLanguage,
   ]);
 
@@ -991,6 +1299,7 @@ export function TranslatorApp({
             From: {sourceSummary} | To: {getLanguageLabel(targetLanguage)}
           </span>
           {copyMessage ? <span className="status-note">{copyMessage}</span> : null}
+          {speechMessage ? <span className="status-note">{speechMessage}</span> : null}
         </div>
 
         {state.errorMessage ? (
@@ -1038,8 +1347,8 @@ export function TranslatorApp({
           ) : (
             <div className="turn-list">
               {turns.map((turn, index) => {
-                const transcriptText = getTurnBodyText(turn, "transcript") || "Listening for speech...";
-                const translationText = getTurnBodyText(turn, "translation");
+                const transcriptText = getTranscriptDisplayText(turn);
+                const translationText = getTranslationDisplayText(turn);
                 const replayText = (turn.translationFinal || turn.translationDraft).trim();
                 const sourceLabel = turn.sourceLanguage
                   ? getLanguageLabel(turn.sourceLanguage)
@@ -1080,12 +1389,7 @@ export function TranslatorApp({
 
                       <section className="conversation-block">
                         <p className="conversation-label">Translation</p>
-                        <p className="conversation-text">
-                          {translationText ||
-                            (turn.status === "error"
-                              ? turn.error || "Translation failed."
-                              : "Waiting for translated text...")}
-                        </p>
+                        <p className="conversation-text">{translationText}</p>
                       </section>
                     </div>
                   </article>
@@ -1098,3 +1402,5 @@ export function TranslatorApp({
     </main>
   );
 }
+
+
