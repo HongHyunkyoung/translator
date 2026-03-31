@@ -197,6 +197,62 @@ async function readTranslationErrorResponse(response: Response) {
   }
 }
 
+function extractRateLimitRetryAfterMs(message: string) {
+  const retryMatch = message.match(/try again in\s+(\d+)\s*(ms|s|sec|secs|seconds|m|min|mins|minutes)/i);
+  if (!retryMatch) {
+    return null;
+  }
+
+  const amount = Number.parseInt(retryMatch[1] ?? "", 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return null;
+  }
+
+  const unit = (retryMatch[2] ?? "s").toLowerCase();
+  if (unit === "ms") {
+    return amount;
+  }
+
+  if (unit.startsWith("m")) {
+    return amount * 60_000;
+  }
+
+  return amount * 1_000;
+}
+
+function formatRetryAfterLabel(retryAfterMs: number) {
+  const totalSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+  if (totalSeconds >= 60) {
+    const minutes = Math.ceil(totalSeconds / 60);
+    return `${minutes}m`;
+  }
+
+  return `${totalSeconds}s`;
+}
+
+function normalizeProviderRateLimitMessage(
+  message: string,
+  provider: RealtimeProvider,
+  kind: "translation" | "speech",
+) {
+  const retryAfterMs = extractRateLimitRetryAfterMs(message);
+  if (!/rate limit/i.test(message) && retryAfterMs === null) {
+    return {
+      message,
+      retryAfterMs: null,
+    };
+  }
+
+  const providerLabel = provider === "openai" ? "OpenAI" : "Gemini";
+  const actionLabel = kind === "speech" ? "speech" : "translation";
+  const retryLabel = retryAfterMs !== null ? ` Try again in ${formatRetryAfterLabel(retryAfterMs)}.` : "";
+
+  return {
+    message: `${providerLabel} ${actionLabel} is temporarily rate limited.${retryLabel}`,
+    retryAfterMs,
+  };
+}
+
 function canUseBrowserSpeechSynthesis() {
   return (
     typeof window !== "undefined" &&
@@ -409,6 +465,10 @@ export function TranslatorApp({
   const audioUrlRef = useRef<string | null>(null);
   const speechAbortControllerRef = useRef<AbortController | null>(null);
   const speechRequestRef = useRef(0);
+  const rateLimitCooldownsRef = useRef({
+    openaiSpeechUntil: 0,
+    openaiTranslationUntil: 0,
+  });
 
   const settings: TranslatorSettings | null = provider
     ? {
@@ -529,6 +589,24 @@ export function TranslatorApp({
     transcript: string,
     activeSettings: TranslatorSettings,
   ) {
+    if (activeSettings.provider === "openai") {
+      const retryAfterMs = rateLimitCooldownsRef.current.openaiTranslationUntil - Date.now();
+      if (retryAfterMs > 0) {
+        startTransition(() => {
+          dispatch({
+            type: "translation/error",
+            itemId,
+            message: normalizeProviderRateLimitMessage(
+              `Please try again in ${formatRetryAfterLabel(retryAfterMs)}.`,
+              "openai",
+              "translation",
+            ).message,
+          });
+        });
+        return;
+      }
+    }
+
     try {
       const response = await fetch("/api/realtime/translate", {
         method: "POST",
@@ -552,6 +630,10 @@ export function TranslatorApp({
         throw new Error("The translation route did not return translated text.");
       }
 
+      if (activeSettings.provider === "openai") {
+        rateLimitCooldownsRef.current.openaiTranslationUntil = 0;
+      }
+
       startTransition(() => {
         dispatch({
           type: "translation/outputDone",
@@ -569,11 +651,22 @@ export function TranslatorApp({
         void playTranslationAudio(translatedText);
       }
     } catch (error) {
+      const normalizedMessage = describeError(error);
+      const rateLimitState = normalizeProviderRateLimitMessage(
+        normalizedMessage,
+        activeSettings.provider,
+        "translation",
+      );
+
+      if (activeSettings.provider === "openai" && rateLimitState.retryAfterMs !== null) {
+        rateLimitCooldownsRef.current.openaiTranslationUntil = Date.now() + rateLimitState.retryAfterMs;
+      }
+
       startTransition(() => {
         dispatch({
           type: "translation/error",
           itemId,
-          message: describeError(error),
+          message: rateLimitState.message,
         });
       });
     }
@@ -587,6 +680,20 @@ export function TranslatorApp({
 
     const activeProvider = providerRef.current;
     const activeTargetLanguage = targetLanguageRef.current;
+
+    if (activeProvider === "openai") {
+      const retryAfterMs = rateLimitCooldownsRef.current.openaiSpeechUntil - Date.now();
+      if (retryAfterMs > 0) {
+        setSpeechMessage(
+          normalizeProviderRateLimitMessage(
+            `Please try again in ${formatRetryAfterLabel(retryAfterMs)}.`,
+            "openai",
+            "speech",
+          ).message,
+        );
+        return;
+      }
+    }
 
     if (
       !activeProvider ||
@@ -659,17 +766,32 @@ export function TranslatorApp({
       releaseActiveAudio();
       setIsSpeaking(false);
 
+      const rateLimitState = reason
+        ? normalizeProviderRateLimitMessage(reason, activeProvider, "speech")
+        : null;
+
+      const retryAfterMs = rateLimitState?.retryAfterMs;
+      if (activeProvider === "openai" && retryAfterMs !== null && retryAfterMs !== undefined) {
+        rateLimitCooldownsRef.current.openaiSpeechUntil = Date.now() + retryAfterMs;
+      }
+
+      const displayReason = rateLimitState?.message ?? reason;
+
       if (disableBrowserSpeechFallback) {
         setInputMuted(false);
         setSpeechMessage(
-          reason
-            ? `Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice. ${reason}`
+          displayReason
+            ? `Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice. ${displayReason}`
             : "Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice.",
         );
         return;
       }
 
-      setSpeechMessage(reason ? `Speech playback fell back to your browser voice. ${reason}` : null);
+      setSpeechMessage(
+        displayReason
+          ? `Speech playback fell back to your browser voice. ${displayReason}`
+          : null,
+      );
       playBrowserTranslation(spokenText, activeTargetLanguage);
     };
 
@@ -1280,4 +1402,5 @@ export function TranslatorApp({
     </main>
   );
 }
+
 
