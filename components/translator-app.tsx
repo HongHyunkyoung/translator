@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { startTransition, useEffect, useReducer, useRef, useState } from "react";
 import {
@@ -43,7 +43,7 @@ const MICROPHONE_ICON = "\uD83C\uDFA4";
 const SPEAKER_ICON = "\uD83D\uDD0A";
 const TITLE_DIVIDER = "\u2192";
 const MICROPHONE_LEVEL_LABEL = "Microphone input level";
-const SERVER_TTS_START_TIMEOUT_MS = 250;
+const SERVER_TTS_START_TIMEOUT_MS = 900;
 
 async function resolveProviderFromServer(): Promise<RealtimeProvider> {
   const response = await fetch("/api/realtime/provider", {
@@ -1098,3 +1098,4 @@ export function TranslatorApp({
     </main>
   );
 }
+

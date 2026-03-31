@@ -25,6 +25,7 @@ const originalGeminiApiKey = process.env.GEMINI_API_KEY;
 const originalGoogleApiKey = process.env.GOOGLE_API_KEY;
 const originalGeminiTtsModel = process.env.GEMINI_TTS_MODEL;
 const originalGeminiTtsVoice = process.env.GEMINI_TTS_VOICE;
+const originalGeminiTtsVoiceKo = process.env.GEMINI_TTS_VOICE_KO;
 const originalRealtimeProvider = process.env.REALTIME_PROVIDER;
 
 afterEach(() => {
@@ -70,6 +71,12 @@ afterEach(() => {
     process.env.GEMINI_TTS_VOICE = originalGeminiTtsVoice;
   }
 
+  if (originalGeminiTtsVoiceKo === undefined) {
+    delete process.env.GEMINI_TTS_VOICE_KO;
+  } else {
+    process.env.GEMINI_TTS_VOICE_KO = originalGeminiTtsVoiceKo;
+  }
+
   if (originalRealtimeProvider === undefined) {
     delete process.env.REALTIME_PROVIDER;
   } else {
@@ -112,7 +119,8 @@ describe("POST /api/realtime/speak", () => {
   it("returns Gemini-generated wav audio", async () => {
     process.env.GEMINI_API_KEY = "gemini-key";
     process.env.GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts";
-    process.env.GEMINI_TTS_VOICE = "Kore";
+    delete process.env.GEMINI_TTS_VOICE;
+    delete process.env.GEMINI_TTS_VOICE_KO;
     process.env.REALTIME_PROVIDER = "gemini";
 
     const pcmData = Buffer.from(Uint8Array.from([0, 0, 255, 127]));
@@ -205,3 +213,5 @@ describe("POST /api/realtime/speak", () => {
     });
   });
 });
+
+

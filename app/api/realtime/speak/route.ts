@@ -32,7 +32,11 @@ function getGeminiTtsModel() {
   return process.env.GEMINI_TTS_MODEL ?? "gemini-2.5-flash-preview-tts";
 }
 
-function getGeminiTtsVoice() {
+function getGeminiTtsVoice(targetLanguage: string) {
+  if (targetLanguage === "ko") {
+    return process.env.GEMINI_TTS_VOICE_KO ?? process.env.GEMINI_TTS_VOICE ?? "Kore";
+  }
+
   return process.env.GEMINI_TTS_VOICE ?? "Achird";
 }
 
@@ -71,13 +75,20 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 function buildSpeechInstructions(targetLanguage: string) {
   const targetLabel = getLanguageLabel(targetLanguage);
+  const localeSpecificInstruction =
+    targetLanguage === "ko"
+      ? "Use natural Korean pacing and sentence endings so the speech sounds fluid and native."
+      : null;
 
   return [
     `Speak in natural, idiomatic ${targetLabel}.`,
     "Sound warm, human, and conversational rather than robotic.",
     "Use smooth pacing like a professional interpreter.",
     "Read only the provided translated text and do not add extra words.",
-  ].join(" ");
+    localeSpecificInstruction,
+  ]
+    .filter((instruction): instruction is string => Boolean(instruction))
+    .join(" ");
 }
 
 function buildGeminiSpeechPrompt(text: string, targetLanguage: string) {
@@ -172,7 +183,7 @@ async function createGeminiSpeech(text: string, targetLanguage: string) {
           languageCode: getSpeechLocale(targetLanguage),
           voiceConfig: {
             prebuiltVoiceConfig: {
-              voiceName: getGeminiTtsVoice(),
+              voiceName: getGeminiTtsVoice(targetLanguage),
             },
           },
         },
@@ -300,4 +311,5 @@ export async function POST(request: Request) {
     ? createGeminiSpeech(text, normalized.targetLanguage)
     : createOpenAISpeech(text, normalized.targetLanguage);
 }
+
 
