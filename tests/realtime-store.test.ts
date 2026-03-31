@@ -75,6 +75,26 @@ describe("translatorReducer", () => {
     expect(state.turnsById).toEqual({});
   });
 
+  it("drops turns when transcription completes with a placeholder status phrase", () => {
+    let state = translatorReducer(initialTranslatorState, {
+      type: "turn/committed",
+      itemId: "turn-placeholder",
+      previousItemId: null,
+      sourceLanguage: "en",
+      createdAt: 21,
+    });
+
+    state = translatorReducer(state, {
+      type: "turn/transcriptCompleted",
+      itemId: "turn-placeholder",
+      transcript: "Waiting for your voice.",
+    });
+
+    expect(selectOrderedTurns(state)).toEqual([]);
+    expect(state.turnsById).toEqual({});
+    expect(getNextQueuedTurnId(state)).toBeNull();
+  });
+
   it("prunes empty placeholder turns when the session goes idle", () => {
     let state = translatorReducer(initialTranslatorState, {
       type: "turn/committed",

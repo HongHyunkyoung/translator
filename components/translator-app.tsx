@@ -85,6 +85,28 @@ function getTurnBodyText(turn: TranslationTurn, kind: "transcript" | "translatio
   return turn.translationFinal || turn.translationDraft;
 }
 
+function getTranscriptDisplayText(turn: TranslationTurn) {
+  const transcriptText = getTurnBodyText(turn, "transcript").trim();
+  if (transcriptText) {
+    return transcriptText;
+  }
+
+  return turn.status === "transcribing" ? "Listening for speech..." : "Transcript unavailable.";
+}
+
+function getTranslationDisplayText(turn: TranslationTurn) {
+  const translationText = getTurnBodyText(turn, "translation").trim();
+  if (translationText) {
+    return translationText;
+  }
+
+  if (turn.status === "error") {
+    return turn.error || "Translation failed.";
+  }
+
+  return turn.status === "done" ? "Translation unavailable." : "Waiting for translated text...";
+}
+
 function buildCopyBlock(turns: TranslationTurn[], kind: "transcript" | "translation") {
   return turns
     .map((turn) => getTurnBodyText(turn, kind).trim())
@@ -1128,8 +1150,8 @@ export function TranslatorApp({
           ) : (
             <div className="turn-list">
               {turns.map((turn, index) => {
-                const transcriptText = getTurnBodyText(turn, "transcript") || "Listening for speech...";
-                const translationText = getTurnBodyText(turn, "translation");
+                const transcriptText = getTranscriptDisplayText(turn);
+                const translationText = getTranslationDisplayText(turn);
                 const replayText = (turn.translationFinal || turn.translationDraft).trim();
                 const sourceLabel = turn.sourceLanguage
                   ? getLanguageLabel(turn.sourceLanguage)
@@ -1170,12 +1192,7 @@ export function TranslatorApp({
 
                       <section className="conversation-block">
                         <p className="conversation-label">Translation</p>
-                        <p className="conversation-text">
-                          {translationText ||
-                            (turn.status === "error"
-                              ? turn.error || "Translation failed."
-                              : "Waiting for translated text...")}
-                        </p>
+                        <p className="conversation-text">{translationText}</p>
                       </section>
                     </div>
                   </article>

@@ -181,6 +181,30 @@ describe("TranslatorApp", () => {
     });
   });
 
+  it("does not keep listening placeholder text on completed turns", async () => {
+    const { callbacks, client } = renderTranslatorApp("openai");
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenCalled();
+    });
+
+    act(() => {
+      callbacks.onConnectionStatus("connected");
+      callbacks.onTurnCommitted({
+        itemId: "turn-empty-finished",
+        previousItemId: null,
+        sourceLanguage: "en",
+      });
+      callbacks.onTranscriptCompleted({
+        itemId: "turn-empty-finished",
+        transcript: "Waiting for your voice.",
+      });
+    });
+
+    expect(screen.queryByText("Listening for speech...")).not.toBeInTheDocument();
+    expect(screen.getByText("Try saying something like: Hello, how are you?")).toBeInTheDocument();
+  });
+
   it("keeps auto/manual source language logic inside the new From and To layout", async () => {
     const { user, client, providerResolver } = renderTranslatorApp("gemini");
 

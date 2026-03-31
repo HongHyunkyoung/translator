@@ -153,6 +153,9 @@ export function buildTranscriptionPrompt(settings: TranslatorSettings) {
     "Transcribe the speech exactly as spoken.",
     "Preserve punctuation, capitalization, and code-switching.",
     "Do not translate or summarize.",
+    "If there is no clear spoken content, return an empty transcript.",
+    "Do not invent words for silence, breathing, room noise, typing, or clipped audio.",
+    "Never output UI or assistant-style status phrases such as 'Listening for speech', 'Waiting for your voice', 'Voice detected', 'Please go ahead', or 'What would you like translated?'.",
   ]
     .join("")
     .trim();

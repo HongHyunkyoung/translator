@@ -143,6 +143,30 @@ function pruneAllEmptyTurns(state: TranslatorState) {
   return state.orderedTurnIds.reduce((nextState, turnId) => pruneEmptyTurn(nextState, turnId), state);
 }
 
+const IGNORABLE_TRANSCRIPT_PHRASES = new Set([
+  "listening for speech",
+  "waiting for your voice",
+  "voice detected",
+  "processing speech",
+  "waiting for translated text",
+  "microphone pauses while translated speech plays",
+  "please say something",
+  "no speech detected",
+]);
+
+function normalizeTranscriptForComparison(text: string) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?,;:]+/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function isIgnorableTranscript(text: string) {
+  const normalized = normalizeTranscriptForComparison(text);
+  return !normalized || IGNORABLE_TRANSCRIPT_PHRASES.has(normalized);
+}
+
 function ensureTurn(
   state: TranslatorState,
   itemId: string,
@@ -270,11 +294,12 @@ export function translatorReducer(
       const nextState = ensureTurn(state, action.itemId);
       const turn = nextState.turnsById[action.itemId];
       const transcript = action.transcript.trim();
-      const shouldQueue = transcript.length > 0;
+      const finalTranscript = isIgnorableTranscript(transcript) ? "" : transcript;
+      const shouldQueue = finalTranscript.length > 0;
       const nextTurn: TranslationTurn = {
         ...turn,
-        transcriptDraft: transcript,
-        transcriptFinal: transcript,
+        transcriptDraft: finalTranscript,
+        transcriptFinal: finalTranscript,
         status: shouldQueue ? "queued" : "done",
         error: null,
       };
