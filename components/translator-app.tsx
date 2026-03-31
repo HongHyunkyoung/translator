@@ -677,6 +677,10 @@ export function TranslatorApp({
       onInputLevel(level) {
         setInputLevel(clampLevel(level));
       },
+      onOutputAudioStateChange(isPlaying) {
+        setSpeechMessage(null);
+        setIsSpeaking(isPlaying);
+      },
       onTurnCommitted(payload) {
         startTransition(() => {
           dispatch({
@@ -734,7 +738,7 @@ export function TranslatorApp({
           });
         });
 
-        if (enableSpeechRef.current) {
+        if (enableSpeechRef.current && providerRef.current !== "openai") {
           void playTranslationAudio(payload.text);
         }
       },
@@ -820,7 +824,9 @@ export function TranslatorApp({
 
     try {
       dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
-      clientRef.current?.requestTranslation(nextQueuedTurnId, settings);
+      clientRef.current?.requestTranslation(nextQueuedTurnId, settings, {
+        enableAudio: settings.provider === "openai" ? enableSpeechRef.current : false,
+      });
     } catch (error) {
       const message = describeError(error);
       dispatch({

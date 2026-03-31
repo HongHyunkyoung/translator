@@ -14,7 +14,7 @@ export type OpenAIRealtimeSessionConfig = {
   type: "realtime";
   model: string;
   instructions: string;
-  output_modalities: ["text"];
+  output_modalities: ["text", "audio"];
   audio: {
     input: {
       noise_reduction: {
@@ -32,6 +32,9 @@ export type OpenAIRealtimeSessionConfig = {
         prefix_padding_ms: number;
         silence_duration_ms: number;
       };
+    };
+    output: {
+      voice: string;
     };
   };
 };
@@ -79,6 +82,10 @@ export function getRealtimeModel() {
 
 export function getTranscriptionModel() {
   return process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-transcribe";
+}
+
+export function getOpenAIRealtimeVoice() {
+  return process.env.OPENAI_REALTIME_VOICE ?? process.env.OPENAI_TTS_VOICE ?? "marin";
 }
 
 export function getGeminiLiveModel() {
@@ -161,7 +168,7 @@ export function buildRealtimeSessionConfig(
     type: "realtime",
     model: getRealtimeModel(),
     instructions: buildTranslatorInstructions(settings),
-    output_modalities: ["text"],
+    output_modalities: ["text", "audio"],
     audio: {
       input: {
         noise_reduction: {
@@ -179,6 +186,9 @@ export function buildRealtimeSessionConfig(
           prefix_padding_ms: 300,
           silence_duration_ms: TURN_SILENCE_DURATION_MS,
         },
+      },
+      output: {
+        voice: getOpenAIRealtimeVoice(),
       },
     },
   };

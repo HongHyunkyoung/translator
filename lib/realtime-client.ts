@@ -53,11 +53,16 @@ export type ClientConnectOptions = {
   settings: TranslatorSettings;
 };
 
+export type TranslationRequestOptions = {
+  enableAudio?: boolean;
+};
+
 export type RealtimeClientCallbacks = {
   onConnectionStatus: (status: ConnectionStatus) => void;
   onError: (message: string) => void;
   onRateLimit: (message: string | null) => void;
   onInputLevel: (level: number) => void;
+  onOutputAudioStateChange: (isPlaying: boolean) => void;
   onTurnCommitted: (payload: {
     itemId: string;
     previousItemId: string | null;
@@ -87,7 +92,11 @@ export interface TranslatorClient {
   connect(options: ClientConnectOptions): Promise<void>;
   disconnect(): void;
   updateSettings(settings: TranslatorSettings): void;
-  requestTranslation(itemId: string, settings: TranslatorSettings): void;
+  requestTranslation(
+    itemId: string,
+    settings: TranslatorSettings,
+    options?: TranslationRequestOptions,
+  ): void;
   setInputMuted(muted: boolean): void;
 }
 
@@ -389,6 +398,10 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
   private meterFrameId: number | null = null;
   private meterSamples: Uint8Array<ArrayBuffer> | null = null;
   private lastInputLevel = 0;
+  private remoteAudioElement: HTMLAudioElement | null = null;
+  private remoteAudioStream: MediaStream | null = null;
+  private activeOutputAudioResponseIds = new Set<string>();
+  private outputAudioActive = false;
 
   constructor(private readonly callbacks: RealtimeClientCallbacks) {}
 
@@ -424,9 +437,36 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
     const peerConnection = new RTCPeerConnection();
     this.peerConnection = peerConnection;
 
+    if (typeof Audio !== "undefined") {
+      const remoteAudioElement = new Audio();
+      remoteAudioElement.autoplay = true;
+      remoteAudioElement.preload = "auto";
+      remoteAudioElement.muted = false;
+      remoteAudioElement.volume = 1;
+      (remoteAudioElement as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+      this.remoteAudioElement = remoteAudioElement;
+    }
+
     this.mediaStream.getTracks().forEach((track) => {
       peerConnection.addTrack(track, this.mediaStream as MediaStream);
     });
+
+    peerConnection.ontrack = (event) => {
+      const stream = event.streams[0];
+      if (!stream || !this.remoteAudioElement) {
+        return;
+      }
+
+      if (this.remoteAudioStream === stream) {
+        return;
+      }
+
+      this.remoteAudioStream = stream;
+      this.remoteAudioElement.srcObject = stream;
+      void this.remoteAudioElement.play().catch(() => {
+        // Ignore autoplay failures; the user can replay with the fallback route.
+      });
+    };
 
     peerConnection.onconnectionstatechange = () => {
       if (!this.peerConnection) {
@@ -437,6 +477,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
       if (state === "connected") {
         this.callbacks.onConnectionStatus("connected");
       } else if (state === "failed" || state === "disconnected" || state === "closed") {
+        this.handleOutputAudioPlaybackEnded();
         this.callbacks.onConnectionStatus("error");
       }
     };
@@ -479,6 +520,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
 
   disconnect() {
     this.pendingTranslationTurnId = null;
+    this.handleOutputAudioPlaybackEnded();
 
     if (this.dataChannel) {
       this.dataChannel.close();
@@ -489,6 +531,13 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
       this.peerConnection.close();
       this.peerConnection = null;
     }
+
+    if (this.remoteAudioElement) {
+      this.remoteAudioElement.pause();
+      this.remoteAudioElement.srcObject = null;
+      this.remoteAudioElement = null;
+    }
+    this.remoteAudioStream = null;
 
     this.stopInputLevelMeter();
 
@@ -515,7 +564,11 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
     }
   }
 
-  requestTranslation(itemId: string, settings: TranslatorSettings) {
+  requestTranslation(
+    itemId: string,
+    settings: TranslatorSettings,
+    options?: TranslationRequestOptions,
+  ) {
     this.settings = settings;
     this.pendingTranslationTurnId = itemId;
 
@@ -529,7 +582,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
             id: itemId,
           },
         ],
-        output_modalities: ["text"],
+        output_modalities: options?.enableAudio === false ? ["text"] : ["text", "audio"],
         metadata: {
           turn_item_id: itemId,
           target_language: settings.targetLanguage,
@@ -552,6 +605,36 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
       this.lastInputLevel = 0;
       this.callbacks.onInputLevel(0);
     }
+  }
+
+  private handleOutputAudioPlaybackStarted(responseId?: string) {
+    if (responseId) {
+      this.activeOutputAudioResponseIds.add(responseId);
+    }
+
+    if (this.outputAudioActive) {
+      return;
+    }
+
+    this.outputAudioActive = true;
+    this.setInputMuted(true);
+    this.callbacks.onOutputAudioStateChange(true);
+  }
+
+  private handleOutputAudioPlaybackEnded(responseId?: string) {
+    if (responseId) {
+      this.activeOutputAudioResponseIds.delete(responseId);
+    } else {
+      this.activeOutputAudioResponseIds.clear();
+    }
+
+    if (!this.outputAudioActive || this.activeOutputAudioResponseIds.size > 0) {
+      return;
+    }
+
+    this.outputAudioActive = false;
+    this.setInputMuted(false);
+    this.callbacks.onOutputAudioStateChange(false);
   }
 
   private async createSession(settings: TranslatorSettings) {
@@ -677,6 +760,12 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
           text: getStringValue(event.text) ?? "",
         });
         break;
+      case "response.output_audio.delta":
+        this.handleOutputAudioPlaybackStarted(getStringValue(event.response_id));
+        break;
+      case "response.output_audio.done":
+        this.handleOutputAudioPlaybackEnded(getStringValue(event.response_id));
+        break;
       case "response.done": {
         const response = typeof event.response === "object" && event.response ? event.response : {};
         const status =
@@ -697,6 +786,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
           itemId: this.pendingTranslationTurnId ?? undefined,
           failedMessage,
         });
+        this.handleOutputAudioPlaybackEnded(responseId);
         this.pendingTranslationTurnId = null;
         break;
       }
@@ -704,6 +794,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
         this.callbacks.onRateLimit(formatRateLimitMessage(event.rate_limits));
         break;
       case "error":
+        this.handleOutputAudioPlaybackEnded();
         this.callbacks.onError(normalizeErrorMessage(event.error));
         break;
       default:
@@ -917,7 +1008,11 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
     this.settings = settings;
   }
 
-  requestTranslation(itemId: string, settings: TranslatorSettings) {
+  requestTranslation(
+    itemId: string,
+    settings: TranslatorSettings,
+    _options?: TranslationRequestOptions,
+  ) {
     this.settings = settings;
 
     const transcript = this.transcriptsByItemId.get(itemId)?.trim();
@@ -1316,8 +1411,12 @@ export class RealtimeTranslatorClient implements TranslatorClient {
     this.ensureTransport(settings.provider).updateSettings(settings);
   }
 
-  requestTranslation(itemId: string, settings: TranslatorSettings) {
-    this.ensureTransport(settings.provider).requestTranslation(itemId, settings);
+  requestTranslation(
+    itemId: string,
+    settings: TranslatorSettings,
+    options?: TranslationRequestOptions,
+  ) {
+    this.ensureTransport(settings.provider).requestTranslation(itemId, settings, options);
   }
 
   setInputMuted(muted: boolean) {

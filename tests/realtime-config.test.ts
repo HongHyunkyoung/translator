@@ -11,6 +11,7 @@ import {
 
 const originalRealtimeModel = process.env.OPENAI_REALTIME_MODEL;
 const originalTranscriptionModel = process.env.OPENAI_TRANSCRIPTION_MODEL;
+const originalRealtimeVoice = process.env.OPENAI_REALTIME_VOICE;
 const originalGeminiLiveModel = process.env.GEMINI_LIVE_MODEL;
 const originalGeminiTranslationModel = process.env.GEMINI_TRANSLATION_MODEL;
 
@@ -25,6 +26,12 @@ afterEach(() => {
     delete process.env.OPENAI_TRANSCRIPTION_MODEL;
   } else {
     process.env.OPENAI_TRANSCRIPTION_MODEL = originalTranscriptionModel;
+  }
+
+  if (originalRealtimeVoice === undefined) {
+    delete process.env.OPENAI_REALTIME_VOICE;
+  } else {
+    process.env.OPENAI_REALTIME_VOICE = originalRealtimeVoice;
   }
 
   if (originalGeminiLiveModel === undefined) {
@@ -44,6 +51,7 @@ describe("realtime-config", () => {
   it("builds manual-language instructions and the OpenAI session config", () => {
     process.env.OPENAI_REALTIME_MODEL = "gpt-realtime-mini";
     process.env.OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
+    process.env.OPENAI_REALTIME_VOICE = "marin";
 
     const settings = {
       provider: "openai" as const,
@@ -74,7 +82,7 @@ describe("realtime-config", () => {
       type: "realtime",
       model: "gpt-realtime-mini",
       instructions: buildTranslatorInstructions(settings),
-      output_modalities: ["text"],
+      output_modalities: ["text", "audio"],
       audio: {
         input: {
           noise_reduction: {
@@ -92,6 +100,9 @@ describe("realtime-config", () => {
             prefix_padding_ms: 300,
             silence_duration_ms: 150,
           },
+        },
+        output: {
+          voice: "marin",
         },
       },
     });

@@ -226,7 +226,7 @@ describe("TranslatorApp", () => {
   it("shows live mic level feedback, mutes input during playback, and supports replay", async () => {
     const { cancel, speak } = installSpeechSynthesisMock();
     const { createObjectURL, fetchMock, playMock } = installAudioPlaybackMocks();
-    const { user, client, callbacks, container } = renderTranslatorApp("openai");
+    const { user, client, callbacks, container } = renderTranslatorApp("gemini");
     const { writeText } = installClipboardMock();
 
     await waitFor(() => {
@@ -237,7 +237,7 @@ describe("TranslatorApp", () => {
 
     expect(client.connect).toHaveBeenCalledWith({
       settings: {
-        provider: "openai",
+        provider: "gemini",
         targetLanguage: "en",
         sourceLanguageMode: "auto",
         sourceLanguage: "en",
@@ -266,12 +266,18 @@ describe("TranslatorApp", () => {
     ).toHaveAttribute("aria-valuenow", "62");
 
     await waitFor(() => {
-      expect(client.requestTranslation).toHaveBeenCalledWith("turn-1", {
-        provider: "openai",
-        targetLanguage: "en",
-        sourceLanguageMode: "auto",
-        sourceLanguage: "en",
-      });
+      expect(client.requestTranslation).toHaveBeenCalledWith(
+        "turn-1",
+        {
+          provider: "gemini",
+          targetLanguage: "en",
+          sourceLanguageMode: "auto",
+          sourceLanguage: "en",
+        },
+        {
+          enableAudio: false,
+        },
+      );
     });
 
     act(() => {
@@ -312,7 +318,7 @@ describe("TranslatorApp", () => {
       }),
     );
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      provider: "openai",
+      provider: "gemini",
       targetLanguage: "en",
       text: "Hello",
     });
@@ -329,7 +335,7 @@ describe("TranslatorApp", () => {
     expect(cancel).toHaveBeenCalled();
     expect(speak).not.toHaveBeenCalled();
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
-      provider: "openai",
+      provider: "gemini",
       targetLanguage: "en",
       text: "Hello",
     });
@@ -339,6 +345,62 @@ describe("TranslatorApp", () => {
     expect(await screen.findByText("Transcript copied.")).toBeInTheDocument();
   });
 
+  it("uses OpenAI realtime audio for automatic playback instead of the speak route", async () => {
+    const { fetchMock } = installAudioPlaybackMocks();
+    const { callbacks, client } = renderTranslatorApp("openai");
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenCalled();
+    });
+
+    act(() => {
+      callbacks.onConnectionStatus("connected");
+      callbacks.onTurnCommitted({
+        itemId: "turn-openai-audio",
+        previousItemId: null,
+        sourceLanguage: "ko",
+      });
+      callbacks.onTranscriptCompleted({
+        itemId: "turn-openai-audio",
+        transcript: "Annyeonghaseyo",
+      });
+    });
+
+    await waitFor(() => {
+      expect(client.requestTranslation).toHaveBeenCalledWith(
+        "turn-openai-audio",
+        {
+          provider: "openai",
+          targetLanguage: "en",
+          sourceLanguageMode: "auto",
+          sourceLanguage: "en",
+        },
+        {
+          enableAudio: true,
+        },
+      );
+    });
+
+    act(() => {
+      callbacks.onTranslationOutputDone({
+        responseId: "response-openai-audio",
+        itemId: "turn-openai-audio",
+        text: "Hello",
+      });
+      callbacks.onOutputAudioStateChange(true);
+    });
+
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByText("Speaking...")).toBeInTheDocument();
+
+    act(() => {
+      callbacks.onOutputAudioStateChange(false);
+    });
+
+    expect(screen.getByRole("button", { name: "Listening..." })).toBeInTheDocument();
+  });
+
   it("falls back to browser speech when provider TTS start is too slow", async () => {
     const { cancel, speak } = installSpeechSynthesisMock();
     let resolveResponse!: (value: Response) => void;
@@ -346,7 +408,7 @@ describe("TranslatorApp", () => {
       resolveResponse = resolve;
     });
     const { fetchMock, playMock } = installAudioPlaybackMocks(delayedResponse);
-    const { callbacks, client } = renderTranslatorApp("openai", {
+    const { user, callbacks, client } = renderTranslatorApp("openai", {
       speechStartTimeoutMs: 10,
     });
 
@@ -355,12 +417,29 @@ describe("TranslatorApp", () => {
     });
 
     act(() => {
+      callbacks.onConnectionStatus("connected");
+      callbacks.onTurnCommitted({
+        itemId: "turn-slow",
+        previousItemId: null,
+        sourceLanguage: "ko",
+      });
+      callbacks.onTranscriptCompleted({
+        itemId: "turn-slow",
+        transcript: "Annyeonghaseyo",
+      });
       callbacks.onTranslationOutputDone({
         responseId: "response-slow",
         itemId: "turn-slow",
         text: "Please start talking right away",
       });
+      callbacks.onResponseDone({
+        responseId: "response-slow",
+        itemId: "turn-slow",
+      });
     });
+
+    await screen.findByText("Please start talking right away");
+    await user.click(screen.getByRole("button", { name: "Replay translation for turn 1" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -395,7 +474,7 @@ describe("TranslatorApp", () => {
         },
       }),
     );
-    const { user, callbacks, client } = renderTranslatorApp("openai");
+    const { user, callbacks, client } = renderTranslatorApp("gemini");
 
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenCalled();
@@ -405,7 +484,7 @@ describe("TranslatorApp", () => {
 
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenLastCalledWith({
-        provider: "openai",
+        provider: "gemini",
         targetLanguage: "ko",
         sourceLanguageMode: "auto",
         sourceLanguage: "en",
@@ -432,7 +511,7 @@ describe("TranslatorApp", () => {
     expect(screen.getByText(/TTS quota exceeded\./i)).toBeInTheDocument();
   });
   it("reuses the transcript when Korean speech is already in Korean", async () => {
-    const { user, callbacks, client } = renderTranslatorApp("openai");
+    const { user, callbacks, client } = renderTranslatorApp("gemini");
 
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenCalled();
@@ -445,7 +524,7 @@ describe("TranslatorApp", () => {
 
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenLastCalledWith({
-        provider: "openai",
+        provider: "gemini",
         targetLanguage: "ko",
         sourceLanguageMode: "auto",
         sourceLanguage: "en",
@@ -477,7 +556,7 @@ describe("TranslatorApp", () => {
   it("disables automatic playback and hides replay controls when speech is turned off", async () => {
     const { speak } = installSpeechSynthesisMock();
     const { fetchMock, playMock } = installAudioPlaybackMocks();
-    const { user, callbacks, client } = renderTranslatorApp("openai");
+    const { user, callbacks, client } = renderTranslatorApp("gemini");
 
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenCalled();
