@@ -91,7 +91,7 @@ function getTargetLanguageStyleDirective(targetLanguage: string) {
   if (targetLanguage === "ko") {
     return [
       "When translating into Korean, sound like a skilled live interpreter speaking to a real listener.",
-      "Prefer everyday spoken Korean with smooth polite endings such as -요, -네요, or -거예요 when appropriate.",
+      "Prefer everyday spoken Korean with smooth polite endings such as -\uC694, -\uB124\uC694, or -\uAC70\uC608\uC694 when appropriate.",
       "Avoid stiff written Korean, textbook phrasing, and overly literal sentence structure unless the source is clearly formal.",
     ].join(" ");
   }

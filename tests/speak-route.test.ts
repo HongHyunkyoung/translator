@@ -143,7 +143,7 @@ describe("POST /api/realtime/speak", () => {
     const response = await POST(
       buildRequest({
         targetLanguage: "ko",
-        text: "æ»≥Á«œººø‰",
+        text: "\uC548\uB155\uD558\uC138\uC694",
       }),
     );
 

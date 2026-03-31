@@ -95,7 +95,7 @@ describe("realtime-config", () => {
     const instructions = buildTranslatorInstructions(settings);
 
     expect(instructions).toContain("When translating into Korean, sound like a skilled live interpreter speaking to a real listener.");
-    expect(instructions).toContain("Prefer everyday spoken Korean with smooth polite endings such as -요, -네요, or -거예요 when appropriate.");
+    expect(instructions).toContain("Prefer everyday spoken Korean with smooth polite endings such as -\uC694, -\uB124\uC694, or -\uAC70\uC608\uC694 when appropriate.");
     expect(instructions).toContain("Avoid stiff written Korean, textbook phrasing, and overly literal sentence structure unless the source is clearly formal.");
   });
   it("omits manual source details when auto-detect is enabled", () => {
