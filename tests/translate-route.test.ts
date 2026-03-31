@@ -21,6 +21,8 @@ import { POST } from "@/app/api/realtime/translate/route";
 const originalGeminiApiKey = process.env.GEMINI_API_KEY;
 const originalGoogleApiKey = process.env.GOOGLE_API_KEY;
 const originalGeminiTranslationModel = process.env.GEMINI_TRANSLATION_MODEL;
+const originalOpenAIApiKey = process.env.OPENAI_API_KEY;
+const originalOpenAITranslationModel = process.env.OPENAI_TRANSLATION_MODEL;
 
 afterEach(() => {
   if (originalGeminiApiKey === undefined) {
@@ -41,7 +43,21 @@ afterEach(() => {
     process.env.GEMINI_TRANSLATION_MODEL = originalGeminiTranslationModel;
   }
 
+  if (originalOpenAIApiKey === undefined) {
+    delete process.env.OPENAI_API_KEY;
+  } else {
+    process.env.OPENAI_API_KEY = originalOpenAIApiKey;
+  }
+
+  if (originalOpenAITranslationModel === undefined) {
+    delete process.env.OPENAI_TRANSLATION_MODEL;
+  } else {
+    process.env.OPENAI_TRANSLATION_MODEL = originalOpenAITranslationModel;
+  }
+
   generateContentMock.mockReset();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function buildRequest(body: unknown) {
@@ -77,13 +93,13 @@ describe("POST /api/realtime/translate", () => {
     });
   });
 
-  it("rejects non-Gemini provider requests", async () => {
-    process.env.GEMINI_API_KEY = "gemini-key";
+  it("returns 500 when the OpenAI key is missing", async () => {
+    delete process.env.OPENAI_API_KEY;
 
     const response = await POST(
       buildRequest({
         provider: "openai",
-        transcript: "Hello",
+        transcript: "Are you listening right now?",
         settings: {
           provider: "openai",
           targetLanguage: "ko",
@@ -92,9 +108,9 @@ describe("POST /api/realtime/translate", () => {
       }),
     );
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({
-      error: "The translation route currently supports only the Gemini provider.",
+      error: "OPENAI_API_KEY is missing on the server.",
     });
   });
 
@@ -130,5 +146,69 @@ describe("POST /api/realtime/translate", () => {
       }),
     });
     expect(String(generateContentMock.mock.calls[0]?.[0]?.contents)).toContain('"""Hello"""');
+  });
+
+  it("returns translated text from OpenAI for assistant-directed questions", async () => {
+    process.env.OPENAI_API_KEY = "openai-key";
+    process.env.OPENAI_TRANSLATION_MODEL = "gpt-4.1-mini";
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              content: [
+                {
+                  text: "지금 듣고 있나요?",
+                  type: "output_text",
+                },
+              ],
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+          },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(
+      buildRequest({
+        provider: "openai",
+        transcript: "Are you listening right now?",
+        settings: {
+          provider: "openai",
+          targetLanguage: "ko",
+          sourceLanguageMode: "auto",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      text: "지금 듣고 있나요?",
+      model: "gpt-4.1-mini",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.openai.com/v1/responses",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer openai-key",
+        }),
+      }),
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(
+      expect.objectContaining({
+        model: "gpt-4.1-mini",
+        instructions: expect.stringContaining("translate that question literally instead of answering it"),
+        input: expect.stringContaining('"""Are you listening right now?"""'),
+      }),
+    );
   });
 });
