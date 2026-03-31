@@ -43,7 +43,7 @@ const MICROPHONE_ICON = "\uD83C\uDFA4";
 const SPEAKER_ICON = "\uD83D\uDD0A";
 const TITLE_DIVIDER = "\u2192";
 const MICROPHONE_LEVEL_LABEL = "Microphone input level";
-const SERVER_TTS_START_TIMEOUT_MS = 2200;
+const SERVER_TTS_START_TIMEOUT_MS = 1600;
 
 async function resolveProviderFromServer(): Promise<RealtimeProvider> {
   const response = await fetch("/api/realtime/provider", {
@@ -495,8 +495,8 @@ export function TranslatorApp({
     const timeoutWindowMs =
       activeProvider === "gemini"
         ? activeTargetLanguage === "ko"
-          ? Math.max(speechStartTimeoutMs, 7000)
-          : Math.max(speechStartTimeoutMs, 4000)
+          ? Math.max(speechStartTimeoutMs, 2800)
+          : Math.max(speechStartTimeoutMs, 2200)
         : speechStartTimeoutMs;
 
     const requestPromise = fetch("/api/realtime/speak", {

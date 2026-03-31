@@ -264,7 +264,7 @@ describe("POST /api/realtime/session", () => {
         realtimeInputConfig: {
           automaticActivityDetection: {
             prefixPaddingMs: 300,
-            silenceDurationMs: 320,
+            silenceDurationMs: 180,
           },
         },
         systemInstruction: {
@@ -291,7 +291,7 @@ describe("POST /api/realtime/session", () => {
             realtimeInputConfig: {
               automaticActivityDetection: {
                 prefixPaddingMs: 300,
-                silenceDurationMs: 320,
+                silenceDurationMs: 180,
               },
             },
             systemInstruction: {
