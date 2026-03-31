@@ -582,7 +582,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
             id: itemId,
           },
         ],
-        output_modalities: options?.enableAudio === false ? ["text"] : ["text", "audio"],
+        output_modalities: options?.enableAudio === false ? ["text"] : ["audio"],
         metadata: {
           turn_item_id: itemId,
           target_language: settings.targetLanguage,

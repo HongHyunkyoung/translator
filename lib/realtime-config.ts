@@ -14,7 +14,7 @@ export type OpenAIRealtimeSessionConfig = {
   type: "realtime";
   model: string;
   instructions: string;
-  output_modalities: ["text", "audio"];
+  output_modalities: ["audio"];
   audio: {
     input: {
       noise_reduction: {
@@ -168,7 +168,7 @@ export function buildRealtimeSessionConfig(
     type: "realtime",
     model: getRealtimeModel(),
     instructions: buildTranslatorInstructions(settings),
-    output_modalities: ["text", "audio"],
+    output_modalities: ["audio"],
     audio: {
       input: {
         noise_reduction: {

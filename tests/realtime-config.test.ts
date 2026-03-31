@@ -82,7 +82,7 @@ describe("realtime-config", () => {
       type: "realtime",
       model: "gpt-realtime-mini",
       instructions: buildTranslatorInstructions(settings),
-      output_modalities: ["text", "audio"],
+      output_modalities: ["audio"],
       audio: {
         input: {
           noise_reduction: {
