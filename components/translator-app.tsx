@@ -490,7 +490,11 @@ export function TranslatorApp({
 
     let timeoutId: number | null = null;
     const timeoutWindowMs =
-      activeProvider === "gemini" ? Math.max(speechStartTimeoutMs, 4000) : speechStartTimeoutMs;
+      activeProvider === "gemini"
+        ? activeTargetLanguage === "ko"
+          ? Math.max(speechStartTimeoutMs, 7000)
+          : Math.max(speechStartTimeoutMs, 4000)
+        : speechStartTimeoutMs;
 
     const requestPromise = fetch("/api/realtime/speak", {
       method: "POST",

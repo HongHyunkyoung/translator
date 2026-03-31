@@ -34,7 +34,7 @@ function getGeminiTtsModel() {
 
 function getGeminiTtsVoice(targetLanguage: string) {
   if (targetLanguage === "ko") {
-    return process.env.GEMINI_TTS_VOICE_KO ?? process.env.GEMINI_TTS_VOICE ?? "Sulafat";
+    return process.env.GEMINI_TTS_VOICE_KO ?? process.env.GEMINI_TTS_VOICE ?? "Despina";
   }
 
   return process.env.GEMINI_TTS_VOICE ?? "Achird";
@@ -73,11 +73,15 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function normalizeSpeechText(text: string) {
+  return text.replace(/\s*\n+\s*/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
 function buildSpeechInstructions(targetLanguage: string) {
   const targetLabel = getLanguageLabel(targetLanguage);
   const localeSpecificInstruction =
     targetLanguage === "ko"
-      ? "Speak in fluent standard Korean with smooth Seoul-style intonation. Avoid choppy syllables, overly formal narration, or robotic pacing. Use natural sentence endings and connected phrasing so the voice feels like a real person speaking."
+      ? "Speak in fluent everyday Korean with soft connected phrasing and natural polite endings. Avoid choppy syllables, textbook diction, overly formal narration, or flat robotic pacing. Use realistic pauses between meaning units so the speech feels like a real interpreter speaking to one listener."
       : null;
 
   return [
@@ -92,11 +96,21 @@ function buildSpeechInstructions(targetLanguage: string) {
 }
 
 function buildGeminiSpeechPrompt(text: string, targetLanguage: string) {
+  const normalizedText = normalizeSpeechText(text);
+  const localeSpecificLeadIn =
+    targetLanguage === "ko"
+      ? "Read the Korean translation like natural spoken interpretation for a live listener. Keep the wording and meaning, but use gentle connected phrasing and realistic pauses."
+      : null;
+
   return [
     buildSpeechInstructions(targetLanguage),
-    "Translated text:",
-    text,
-  ].join("\n\n");
+    localeSpecificLeadIn,
+    "Read the following translated text aloud exactly once.",
+    "Text to read:",
+    `\"\"\"${normalizedText}\"\"\"`,
+  ]
+    .filter((instruction): instruction is string => Boolean(instruction))
+    .join("\n\n");
 }
 
 function createWavFile(

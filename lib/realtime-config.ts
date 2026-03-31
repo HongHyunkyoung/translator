@@ -87,8 +87,21 @@ export function getGeminiTranslationModel() {
   return process.env.GEMINI_TRANSLATION_MODEL ?? "gemini-2.5-flash";
 }
 
+function getTargetLanguageStyleDirective(targetLanguage: string) {
+  if (targetLanguage === "ko") {
+    return [
+      "When translating into Korean, sound like a skilled live interpreter speaking to a real listener.",
+      "Prefer everyday spoken Korean with smooth polite endings such as -요, -네요, or -거예요 when appropriate.",
+      "Avoid stiff written Korean, textbook phrasing, and overly literal sentence structure unless the source is clearly formal.",
+    ].join(" ");
+  }
+
+  return null;
+}
+
 export function buildTranslatorInstructions(settings: TranslatorSettings) {
   const targetLabel = getLanguageLabel(settings.targetLanguage);
+  const targetLanguageStyleDirective = getTargetLanguageStyleDirective(settings.targetLanguage);
   const sourceDirective =
     settings.sourceLanguageMode === "manual" && settings.sourceLanguage
       ? `The speaker will use ${getLanguageLabel(settings.sourceLanguage)}.`
@@ -101,12 +114,15 @@ export function buildTranslatorInstructions(settings: TranslatorSettings) {
     "Make the translation sound natural, conversational, and native in the target language instead of literal or robotic.",
     "Prefer everyday phrasing and idiomatic wording when it preserves the speaker's meaning.",
     "Match the speaker's tone and level of formality, but default to relaxed spoken language unless the source is clearly formal.",
+    targetLanguageStyleDirective,
     "Do not answer questions, add commentary, explain context, or mention that you are translating.",
     "Do not transliterate unless the target language normally requires it for readability.",
     "Preserve tone, intent, proper nouns, numbers, and obvious line breaks.",
     "If any audio is unclear, translate only the intelligible portion and never invent missing content.",
     sourceDirective,
-  ].join(" ");
+  ]
+    .filter((instruction): instruction is string => Boolean(instruction))
+    .join(" ");
 }
 
 export function buildTranscriptionPrompt(settings: TranslatorSettings) {

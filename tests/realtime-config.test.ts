@@ -84,6 +84,20 @@ describe("realtime-config", () => {
     });
   });
 
+  it("adds spoken-Korean guidance when Korean is the target language", () => {
+    const settings = {
+      provider: "gemini" as const,
+      targetLanguage: "ko",
+      sourceLanguageMode: "auto" as const,
+      sourceLanguage: "en",
+    };
+
+    const instructions = buildTranslatorInstructions(settings);
+
+    expect(instructions).toContain("When translating into Korean, sound like a skilled live interpreter speaking to a real listener.");
+    expect(instructions).toContain("Prefer everyday spoken Korean with smooth polite endings such as -요, -네요, or -거예요 when appropriate.");
+    expect(instructions).toContain("Avoid stiff written Korean, textbook phrasing, and overly literal sentence structure unless the source is clearly formal.");
+  });
   it("omits manual source details when auto-detect is enabled", () => {
     const settings = {
       provider: "openai" as const,

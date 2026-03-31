@@ -154,14 +154,14 @@ describe("POST /api/realtime/speak", () => {
     expect(audioBuffer.subarray(0, 4).toString("ascii")).toBe("RIFF");
     expect(generateContentMock).toHaveBeenCalledWith({
       model: "gemini-2.5-flash-preview-tts",
-      contents: expect.stringContaining("æ»≥Á«œººø‰"),
+      contents: expect.stringContaining("Read the Korean translation like natural spoken interpretation for a live listener."),
       config: {
         responseModalities: ["AUDIO"],
         speechConfig: {
           languageCode: "ko-KR",
           voiceConfig: {
             prebuiltVoiceConfig: {
-              voiceName: "Sulafat",
+              voiceName: "Despina",
             },
           },
         },
