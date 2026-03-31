@@ -57,6 +57,7 @@ export type RealtimeClientCallbacks = {
   onConnectionStatus: (status: ConnectionStatus) => void;
   onError: (message: string) => void;
   onRateLimit: (message: string | null) => void;
+  onInputLevel: (level: number) => void;
   onTurnCommitted: (payload: {
     itemId: string;
     previousItemId: string | null;
@@ -87,6 +88,7 @@ export interface TranslatorClient {
   disconnect(): void;
   updateSettings(settings: TranslatorSettings): void;
   requestTranslation(itemId: string, settings: TranslatorSettings): void;
+  setInputMuted(muted: boolean): void;
 }
 
 type RealtimeServerEvent = {
@@ -335,6 +337,40 @@ function downsampleTo16BitPcm(
   return result;
 }
 
+function clampInputLevel(level: number) {
+  return Math.max(0, Math.min(1, level));
+}
+
+function measureInputLevel(samples: Float32Array) {
+  if (samples.length === 0) {
+    return 0;
+  }
+
+  let sumSquares = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index] ?? 0;
+    sumSquares += sample * sample;
+  }
+
+  const rms = Math.sqrt(sumSquares / samples.length);
+  return clampInputLevel(rms * 4.5);
+}
+
+function measureByteInputLevel(samples: ArrayLike<number>) {
+  if (samples.length === 0) {
+    return 0;
+  }
+
+  let sumSquares = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = ((samples[index] ?? 128) - 128) / 128;
+    sumSquares += sample * sample;
+  }
+
+  const rms = Math.sqrt(sumSquares / samples.length);
+  return clampInputLevel(rms * 4.5);
+}
+
 class OpenAIRealtimeTranslatorClient implements TranslatorClient {
   private peerConnection: RTCPeerConnection | null = null;
   private dataChannel: RTCDataChannel | null = null;
@@ -342,12 +378,21 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
   private sessionConfig: OpenAIRealtimeSessionConfig | null = null;
   private settings: TranslatorSettings | null = null;
   private pendingTranslationTurnId: string | null = null;
+  private inputMuted = false;
+  private meterContext: AudioContext | null = null;
+  private meterSourceNode: MediaStreamAudioSourceNode | null = null;
+  private meterAnalyserNode: AnalyserNode | null = null;
+  private meterFrameId: number | null = null;
+  private meterSamples: Uint8Array<ArrayBuffer> | null = null;
+  private lastInputLevel = 0;
 
   constructor(private readonly callbacks: RealtimeClientCallbacks) {}
 
   async connect({ settings }: ClientConnectOptions) {
     this.disconnect();
     this.settings = settings;
+    this.inputMuted = false;
+    this.lastInputLevel = 0;
 
     this.callbacks.onConnectionStatus("requesting-permission");
 
@@ -360,11 +405,13 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
           autoGainControl: true,
         },
       });
+      void this.startInputLevelMeter();
     } catch {
       this.callbacks.onConnectionStatus("error");
       throw new Error("Microphone access was denied. Allow microphone access and try again.");
     }
 
+    this.setInputMuted(false);
     this.callbacks.onConnectionStatus("connecting");
 
     const sessionResponse = await this.createSession(settings);
@@ -407,7 +454,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
     const response = await fetch("https://api.openai.com/v1/realtime/calls", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${sessionResponse.ephemeralKey}`,
+        Authorization: "Bearer " + sessionResponse.ephemeralKey,
         "Content-Type": "application/sdp",
       },
       body: offer.sdp,
@@ -416,7 +463,7 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
     if (!response.ok) {
       const message = await readErrorResponse(response);
       this.callbacks.onConnectionStatus("error");
-      throw new Error(`Realtime connection failed: ${message}`);
+      throw new Error("Realtime connection failed: " + message);
     }
 
     const answer = await response.text();
@@ -439,11 +486,16 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
       this.peerConnection = null;
     }
 
+    this.stopInputLevelMeter();
+
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
     }
 
+    this.inputMuted = false;
+    this.lastInputLevel = 0;
+    this.callbacks.onInputLevel(0);
     this.callbacks.onConnectionStatus("idle");
   }
 
@@ -481,6 +533,21 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
         instructions: this.sessionConfig?.instructions,
       },
     });
+  }
+
+  setInputMuted(muted: boolean) {
+    this.inputMuted = muted;
+
+    if (this.mediaStream) {
+      this.mediaStream.getAudioTracks().forEach((track) => {
+        track.enabled = !muted;
+      });
+    }
+
+    if (muted) {
+      this.lastInputLevel = 0;
+      this.callbacks.onInputLevel(0);
+    }
   }
 
   private async createSession(settings: TranslatorSettings) {
@@ -640,6 +707,88 @@ class OpenAIRealtimeTranslatorClient implements TranslatorClient {
     }
   }
 
+  private async startInputLevelMeter() {
+    if (!this.mediaStream || typeof window === "undefined" || !window.AudioContext) {
+      return;
+    }
+
+    this.stopInputLevelMeter();
+
+    const meterContext = new window.AudioContext();
+    await meterContext.resume();
+
+    if (!this.mediaStream) {
+      await meterContext.close();
+      return;
+    }
+
+    const meterSourceNode = meterContext.createMediaStreamSource(this.mediaStream);
+    const meterAnalyserNode = meterContext.createAnalyser();
+    meterAnalyserNode.fftSize = 2048;
+    meterAnalyserNode.smoothingTimeConstant = 0.85;
+    const meterSamples = new Uint8Array(new ArrayBuffer(meterAnalyserNode.fftSize));
+
+    meterSourceNode.connect(meterAnalyserNode);
+
+    this.meterContext = meterContext;
+    this.meterSourceNode = meterSourceNode;
+    this.meterAnalyserNode = meterAnalyserNode;
+    this.meterSamples = meterSamples;
+
+    const updateMeter = () => {
+      if (
+        typeof window === "undefined" ||
+        this.meterAnalyserNode !== meterAnalyserNode ||
+        !this.meterSamples
+      ) {
+        return;
+      }
+
+      meterAnalyserNode.getByteTimeDomainData(this.meterSamples);
+      this.emitInputLevel(this.inputMuted ? 0 : measureByteInputLevel(this.meterSamples));
+      this.meterFrameId = window.requestAnimationFrame(updateMeter);
+    };
+
+    updateMeter();
+  }
+
+  private stopInputLevelMeter() {
+    if (typeof window !== "undefined" && this.meterFrameId !== null) {
+      window.cancelAnimationFrame(this.meterFrameId);
+    }
+    this.meterFrameId = null;
+
+    if (this.meterSourceNode) {
+      this.meterSourceNode.disconnect();
+      this.meterSourceNode = null;
+    }
+
+    if (this.meterAnalyserNode) {
+      this.meterAnalyserNode.disconnect();
+      this.meterAnalyserNode = null;
+    }
+
+    this.meterSamples = null;
+
+    if (this.meterContext) {
+      void this.meterContext.close();
+      this.meterContext = null;
+    }
+  }
+
+  private emitInputLevel(level: number) {
+    const nextLevel = this.inputMuted
+      ? 0
+      : clampInputLevel(this.lastInputLevel * 0.7 + clampInputLevel(level) * 0.3);
+
+    if (Math.abs(nextLevel - this.lastInputLevel) < 0.01 && !(nextLevel === 0 && this.lastInputLevel !== 0)) {
+      return;
+    }
+
+    this.lastInputLevel = nextLevel;
+    this.callbacks.onInputLevel(nextLevel);
+  }
+
   private sendEvent(event: Record<string, unknown>) {
     if (!this.dataChannel || this.dataChannel.readyState !== "open") {
       throw new Error("Realtime data channel is not ready yet.");
@@ -669,6 +818,8 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
   private responseCounter = 0;
   private lifecycleToken = 0;
   private disconnecting = false;
+  private inputMuted = false;
+  private lastInputLevel = 0;
 
   constructor(private readonly callbacks: RealtimeClientCallbacks) {}
 
@@ -676,6 +827,8 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
     this.disconnect();
     this.disconnecting = false;
     this.settings = settings;
+    this.inputMuted = false;
+    this.lastInputLevel = 0;
     const lifecycleToken = ++this.lifecycleToken;
 
     this.callbacks.onConnectionStatus("requesting-permission");
@@ -694,6 +847,7 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
       throw new Error("Microphone access was denied. Allow microphone access and try again.");
     }
 
+    this.setInputMuted(false);
     this.callbacks.onConnectionStatus("connecting");
 
     const sessionResponse = await this.createSession(settings);
@@ -749,6 +903,9 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
       this.mediaStream = null;
     }
 
+    this.inputMuted = false;
+    this.lastInputLevel = 0;
+    this.callbacks.onInputLevel(0);
     this.callbacks.onConnectionStatus("idle");
   }
 
@@ -764,7 +921,7 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
       throw new Error("Transcript is not ready for translation yet.");
     }
 
-    const responseId = `gemini-response-${++this.responseCounter}`;
+    const responseId = "gemini-response-" + ++this.responseCounter;
     const lifecycleToken = this.lifecycleToken;
 
     this.callbacks.onResponseCreated({
@@ -779,6 +936,21 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
       settings,
       lifecycleToken,
     });
+  }
+
+  setInputMuted(muted: boolean) {
+    this.inputMuted = muted;
+
+    if (this.mediaStream) {
+      this.mediaStream.getAudioTracks().forEach((track) => {
+        track.enabled = !muted;
+      });
+    }
+
+    if (muted) {
+      this.lastInputLevel = 0;
+      this.callbacks.onInputLevel(0);
+    }
   }
 
   private async createSession(settings: TranslatorSettings) {
@@ -809,7 +981,7 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
   private async openSocket(session: GeminiSessionResponse, lifecycleToken: number) {
     const url =
       "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained" +
-      `?access_token=${encodeURIComponent(session.ephemeralKey)}`;
+      "?access_token=" + encodeURIComponent(session.ephemeralKey);
 
     await new Promise<void>((resolve, reject) => {
       const websocket = new WebSocket(url);
@@ -922,7 +1094,7 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
     }
 
     if (!this.activeTranscriptTurn) {
-      const itemId = `gemini-turn-${++this.turnCounter}`;
+      const itemId = "gemini-turn-" + ++this.turnCounter;
       this.activeTranscriptTurn = {
         itemId,
         transcript: "",
@@ -1001,16 +1173,17 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
     monitorNode.gain.value = 0;
 
     processorNode.onaudioprocess = (event) => {
-      if (
-        this.disconnecting ||
-        this.lifecycleToken !== lifecycleToken ||
-        !this.websocket ||
-        this.websocket.readyState !== WebSocket.OPEN
-      ) {
+      if (this.disconnecting || this.lifecycleToken !== lifecycleToken) {
         return;
       }
 
       const channelData = event.inputBuffer.getChannelData(0);
+      this.emitInputLevel(this.inputMuted ? 0 : measureInputLevel(channelData));
+
+      if (this.inputMuted || !this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
       const pcm16 = downsampleTo16BitPcm(channelData, audioContext.sampleRate);
 
       if (pcm16.length === 0) {
@@ -1037,6 +1210,19 @@ class GeminiRealtimeTranslatorClient implements TranslatorClient {
     this.sourceNode = sourceNode;
     this.processorNode = processorNode;
     this.monitorNode = monitorNode;
+  }
+
+  private emitInputLevel(level: number) {
+    const nextLevel = this.inputMuted
+      ? 0
+      : clampInputLevel(this.lastInputLevel * 0.7 + clampInputLevel(level) * 0.3);
+
+    if (Math.abs(nextLevel - this.lastInputLevel) < 0.01 && !(nextLevel === 0 && this.lastInputLevel !== 0)) {
+      return;
+    }
+
+    this.lastInputLevel = nextLevel;
+    this.callbacks.onInputLevel(nextLevel);
   }
 
   private async translateWithGemini(options: {
@@ -1128,6 +1314,10 @@ export class RealtimeTranslatorClient implements TranslatorClient {
 
   requestTranslation(itemId: string, settings: TranslatorSettings) {
     this.ensureTransport(settings.provider).requestTranslation(itemId, settings);
+  }
+
+  setInputMuted(muted: boolean) {
+    this.transport?.setInputMuted(muted);
   }
 
   private ensureTransport(provider: RealtimeProvider) {

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { startTransition, useEffect, useReducer, useRef, useState } from "react";
 import {
@@ -27,6 +27,24 @@ type TranslatorAppProps = {
   speechStartTimeoutMs?: number;
 };
 
+type InterpreterActivity =
+  | "idle"
+  | "listening"
+  | "processing"
+  | "translating"
+  | "speaking";
+
+type SpeechLifecycleCallbacks = {
+  onEnd?: () => void;
+  onStart?: () => void;
+};
+
+const MICROPHONE_ICON = "\uD83C\uDFA4";
+const SPEAKER_ICON = "\uD83D\uDD0A";
+const TITLE_DIVIDER = "\u2192";
+const MICROPHONE_LEVEL_LABEL = "Microphone input level";
+const SERVER_TTS_START_TIMEOUT_MS = 250;
+
 async function resolveProviderFromServer(): Promise<RealtimeProvider> {
   const response = await fetch("/api/realtime/provider", {
     cache: "no-store",
@@ -44,59 +62,16 @@ async function resolveProviderFromServer(): Promise<RealtimeProvider> {
   return payload.provider;
 }
 
-const SERVER_TTS_START_TIMEOUT_MS = 250;
-
-function getConnectionLabel(status: ConnectionStatus) {
-  switch (status) {
-    case "requesting-permission":
-      return "Requesting microphone";
-    case "connecting":
-      return "Connecting";
-    case "connected":
-      return "Connected";
-    case "error":
-      return "Needs attention";
-    default:
-      return "Idle";
-  }
-}
-
-function getConnectionTone(status: ConnectionStatus) {
-  switch (status) {
-    case "connected":
-      return "good";
-    case "error":
-      return "danger";
-    case "connecting":
-    case "requesting-permission":
-      return "warn";
-    default:
-      return "muted";
-  }
-}
-
-function getProviderLabel(provider: RealtimeProvider | null) {
-  if (provider === "gemini") {
-    return "Gemini";
-  }
-
-  if (provider === "openai") {
-    return "OpenAI";
-  }
-
-  return "Detecting";
-}
-
 function getTurnStatusLabel(turn: TranslationTurn) {
   switch (turn.status) {
     case "transcribing":
-      return "Listening";
+      return "Listening...";
     case "queued":
-      return "Queued";
+      return "Processing speech...";
     case "translating":
-      return "Translating";
+      return "Translating...";
     case "error":
-      return "Error";
+      return "Needs attention";
     default:
       return "Ready";
   }
@@ -119,6 +94,29 @@ function buildCopyBlock(turns: TranslationTurn[], kind: "transcript" | "translat
 
 function getSpeechLocale(targetLanguage: string) {
   return LANGUAGE_OPTIONS.find((language) => language.code === targetLanguage)?.locale ?? "en-US";
+}
+
+function getSourceSummary(sourceLanguageMode: SourceLanguageMode, sourceLanguage: string) {
+  return sourceLanguageMode === "manual" ? getLanguageLabel(sourceLanguage) : "Auto detect";
+}
+
+function clampLevel(level: number) {
+  return Math.max(0, Math.min(1, level));
+}
+
+function getWaveformHeights(inputLevel: number, isSpeaking: boolean) {
+  const baseLevel = isSpeaking ? 0 : clampLevel(inputLevel);
+  const multipliers = [0.38, 0.62, 0.96, 0.84, 0.58, 0.32];
+
+  return multipliers.map((factor) => 12 + Math.round(baseLevel * factor * 28));
+}
+
+function getMicrophoneFeedbackText(inputLevel: number, isSpeaking: boolean) {
+  if (isSpeaking) {
+    return "Microphone pauses while translated speech plays.";
+  }
+
+  return inputLevel >= 0.12 ? "Voice detected." : "Waiting for your voice.";
 }
 
 async function readSpeechErrorResponse(response: Response) {
@@ -215,10 +213,14 @@ function selectPreferredSpeechVoice(
   return rankedVoices[0] ?? null;
 }
 
-function speakTranslation(text: string, targetLanguage: string) {
+function speakTranslation(
+  text: string,
+  targetLanguage: string,
+  callbacks?: SpeechLifecycleCallbacks,
+) {
   const spokenText = text.trim();
   if (!spokenText || !canUseBrowserSpeechSynthesis()) {
-    return;
+    return false;
   }
 
   const utterance = new SpeechSynthesisUtterance(spokenText);
@@ -226,6 +228,12 @@ function speakTranslation(text: string, targetLanguage: string) {
   utterance.lang = locale;
   utterance.rate = 0.96;
   utterance.pitch = 1;
+  utterance.onend = () => {
+    callbacks?.onEnd?.();
+  };
+  utterance.onerror = () => {
+    callbacks?.onEnd?.();
+  };
 
   const matchingVoice = selectPreferredSpeechVoice(
     window.speechSynthesis.getVoices(),
@@ -238,7 +246,9 @@ function speakTranslation(text: string, targetLanguage: string) {
   }
 
   stopBrowserSpeechSynthesis();
+  callbacks?.onStart?.();
   window.speechSynthesis.speak(utterance);
+  return true;
 }
 
 function describeError(error: unknown) {
@@ -247,6 +257,69 @@ function describeError(error: unknown) {
   }
 
   return "Something went wrong while talking to the selected realtime provider.";
+}
+
+function getInterpreterActivity(
+  turns: TranslationTurn[],
+  connectionStatus: ConnectionStatus,
+  isSpeaking: boolean,
+): InterpreterActivity {
+  if (isSpeaking) {
+    return "speaking";
+  }
+
+  if (turns.some((turn) => turn.status === "translating")) {
+    return "translating";
+  }
+
+  if (turns.some((turn) => turn.status === "queued")) {
+    return "processing";
+  }
+
+  if (
+    connectionStatus === "connected" ||
+    connectionStatus === "connecting" ||
+    connectionStatus === "requesting-permission"
+  ) {
+    return "listening";
+  }
+
+  return "idle";
+}
+
+function getInterpreterActivityLabel(activity: InterpreterActivity) {
+  switch (activity) {
+    case "listening":
+      return "Listening...";
+    case "processing":
+      return "Processing speech...";
+    case "translating":
+      return "Translating...";
+    case "speaking":
+      return "Speaking...";
+    default:
+      return "Idle";
+  }
+}
+
+function getInterpreterActivityTone(
+  activity: InterpreterActivity,
+  connectionStatus: ConnectionStatus,
+) {
+  if (connectionStatus === "error") {
+    return "danger";
+  }
+
+  switch (activity) {
+    case "listening":
+    case "speaking":
+      return "good";
+    case "processing":
+    case "translating":
+      return "warn";
+    default:
+      return "muted";
+  }
 }
 
 export function TranslatorApp({
@@ -261,6 +334,8 @@ export function TranslatorApp({
   const [sourceLanguage, setSourceLanguage] = useState("en");
   const [enableSpeech, setEnableSpeech] = useState(true);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [inputLevel, setInputLevel] = useState(0);
   const clientRef = useRef<TranslatorClient | null>(null);
   const enableSpeechRef = useRef(enableSpeech);
   const providerRef = useRef<RealtimeProvider | null>(provider);
@@ -316,6 +391,13 @@ export function TranslatorApp({
     targetLanguageRef.current = targetLanguage;
   }, [targetLanguage]);
 
+  function setInputMuted(muted: boolean) {
+    clientRef.current?.setInputMuted(muted);
+    if (muted) {
+      setInputLevel(0);
+    }
+  }
+
   function releaseActiveAudio() {
     const activeAudio = audioRef.current;
     if (activeAudio) {
@@ -339,6 +421,8 @@ export function TranslatorApp({
     speechAbortControllerRef.current = null;
     releaseActiveAudio();
     stopBrowserSpeechSynthesis();
+    setInputMuted(false);
+    setIsSpeaking(false);
   }
 
   useEffect(() => {
@@ -346,6 +430,34 @@ export function TranslatorApp({
       stopActiveSpeech();
     }
   }, [enableSpeech]);
+
+  function playBrowserTranslation(text: string, language: string) {
+    setInputMuted(true);
+
+    const started = speakTranslation(text, language, {
+      onEnd: () => {
+        setIsSpeaking(false);
+        setInputMuted(false);
+      },
+      onStart: () => {
+        setIsSpeaking(true);
+      },
+    });
+
+    if (!started) {
+      setIsSpeaking(false);
+      setInputMuted(false);
+    }
+  }
+
+  function handleReplayTranslation(text: string) {
+    if (!text.trim()) {
+      return;
+    }
+
+    stopActiveSpeech();
+    playBrowserTranslation(text, targetLanguageRef.current);
+  }
 
   async function playTranslationAudio(text: string) {
     const spokenText = text.trim();
@@ -362,7 +474,7 @@ export function TranslatorApp({
       typeof Audio === "undefined" ||
       typeof URL.createObjectURL !== "function"
     ) {
-      speakTranslation(spokenText, activeTargetLanguage);
+      playBrowserTranslation(spokenText, activeTargetLanguage);
       return;
     }
 
@@ -371,6 +483,7 @@ export function TranslatorApp({
     speechAbortControllerRef.current?.abort();
     releaseActiveAudio();
     stopBrowserSpeechSynthesis();
+    setIsSpeaking(false);
 
     const abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
     speechAbortControllerRef.current = abortController;
@@ -413,7 +526,8 @@ export function TranslatorApp({
         return;
       }
       releaseActiveAudio();
-      speakTranslation(spokenText, activeTargetLanguage);
+      setIsSpeaking(false);
+      playBrowserTranslation(spokenText, activeTargetLanguage);
     };
 
     try {
@@ -467,12 +581,17 @@ export function TranslatorApp({
           }
           audioUrlRef.current = null;
         }
+
+        setInputMuted(false);
+        setIsSpeaking(false);
       };
 
       audio.onended = clearCurrentAudio;
       audio.onerror = clearCurrentAudio;
       audioRef.current = audio;
       audioUrlRef.current = audioUrl;
+      setInputMuted(true);
+      setIsSpeaking(true);
 
       await audio.play();
     } catch (error) {
@@ -481,6 +600,7 @@ export function TranslatorApp({
         return;
       }
 
+      setIsSpeaking(false);
       fallbackToBrowserSpeech();
     }
   }
@@ -501,6 +621,9 @@ export function TranslatorApp({
         startTransition(() => {
           dispatch({ type: "rate-limit/set", message });
         });
+      },
+      onInputLevel(level) {
+        setInputLevel(clampLevel(level));
       },
       onTurnCommitted(payload) {
         startTransition(() => {
@@ -578,7 +701,22 @@ export function TranslatorApp({
 
   const turns = selectOrderedTurns(state);
   const nextQueuedTurnId = getNextQueuedTurnId(state);
-  const isConnected = state.connectionStatus === "connected";
+  const isSessionActive =
+    state.connectionStatus === "connected" ||
+    state.connectionStatus === "connecting" ||
+    state.connectionStatus === "requesting-permission";
+  const interpreterActivity = getInterpreterActivity(
+    turns,
+    state.connectionStatus,
+    isSpeaking,
+  );
+  const sourceSummary = getSourceSummary(sourceLanguageMode, sourceLanguage);
+  const sourceLanguageDisabled = sourceLanguageMode !== "manual";
+  const normalizedInputLevel = clampLevel(inputLevel);
+  const inputLevelPercent = isSpeaking ? 0 : Math.round(normalizedInputLevel * 100);
+  const inputMeterWidth = isSpeaking ? 0 : Math.max(isSessionActive ? 6 : 0, inputLevelPercent);
+  const waveformHeights = getWaveformHeights(normalizedInputLevel, isSpeaking);
+  const microphoneFeedbackText = getMicrophoneFeedbackText(normalizedInputLevel, isSpeaking);
 
   useEffect(() => {
     if (!provider) {
@@ -609,7 +747,14 @@ export function TranslatorApp({
         message,
       });
     }
-  }, [nextQueuedTurnId, provider, targetLanguage, sourceLanguageMode, sourceLanguage, state.connectionStatus]);
+  }, [
+    nextQueuedTurnId,
+    provider,
+    sourceLanguage,
+    sourceLanguageMode,
+    state.connectionStatus,
+    targetLanguage,
+  ]);
 
   useEffect(() => {
     if (!copyMessage) {
@@ -626,11 +771,21 @@ export function TranslatorApp({
   }, [copyMessage]);
 
   useEffect(() => {
+    if (!isSessionActive) {
+      setInputLevel(0);
+    }
+  }, [isSessionActive]);
+
+  useEffect(() => {
     return () => {
       stopActiveSpeech();
       clientRef.current?.disconnect();
     };
   }, []);
+
+  function handleSourceModeChange(value: SourceLanguageMode) {
+    setSourceLanguageMode(value);
+  }
 
   async function handleStart() {
     dispatch({ type: "error/set", message: null });
@@ -708,19 +863,48 @@ export function TranslatorApp({
 
       <section className="hero-card">
         <p className="eyebrow">Realtime speech interpreter</p>
-        <h1>Transcribe the source voice and translate it live in one session.</h1>
+        <h1>Talk in your language. See and hear translations instantly.</h1>
         <p className="hero-copy">
-          The app automatically uses whichever realtime provider is configured on the
-          server, keeps the API keys off the client, and lets you reset the session instantly.
+          Start speaking and get realtime transcription and translation in one place.
         </p>
       </section>
 
       <section className="control-card">
-        <div className="control-grid">
-          <label className="field">
-            <span>Target language</span>
+        <div className="language-row">
+          <label className="field field-from">
+            <span>From</span>
+            <div className="from-control-row">
+              <select
+                aria-label="From mode"
+                className="select-compact"
+                value={sourceLanguageMode}
+                onChange={(event) =>
+                  handleSourceModeChange(event.target.value as SourceLanguageMode)
+                }
+              >
+                <option value="auto">Auto detect</option>
+                <option value="manual">Manual override</option>
+              </select>
+
+              <select
+                aria-label="Manual source language"
+                disabled={sourceLanguageDisabled}
+                value={sourceLanguage}
+                onChange={(event) => setSourceLanguage(event.target.value)}
+              >
+                {LANGUAGE_OPTIONS.map((language) => (
+                  <option key={language.code} value={language.code}>
+                    {language.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+
+          <label className="field field-to">
+            <span>To</span>
             <select
-              aria-label="Target language"
+              aria-label="To language"
               value={targetLanguage}
               onChange={(event) => setTargetLanguage(event.target.value)}
             >
@@ -731,57 +915,27 @@ export function TranslatorApp({
               ))}
             </select>
           </label>
-
-          <label className="field">
-            <span>Source mode</span>
-            <select
-              aria-label="Source mode"
-              value={sourceLanguageMode}
-              onChange={(event) =>
-                setSourceLanguageMode(event.target.value as SourceLanguageMode)
-              }
-            >
-              <option value="auto">Auto detect</option>
-              <option value="manual">Manual override</option>
-            </select>
-          </label>
-
-          <label className="field">
-            <span>Manual source language</span>
-            <select
-              aria-label="Manual source language"
-              disabled={sourceLanguageMode !== "manual"}
-              value={sourceLanguage}
-              onChange={(event) => setSourceLanguage(event.target.value)}
-            >
-              {LANGUAGE_OPTIONS.map((language) => (
-                <option key={language.code} value={language.code}>
-                  {language.label}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
 
-        <label className="status-note">
+        <label className="auto-play-toggle">
           <input
             checked={enableSpeech}
             onChange={(event) => setEnableSpeech(event.target.checked)}
             type="checkbox"
-          />{" "}
-          Speak translation aloud
+          />
+          Automatically play translated speech
         </label>
 
         <div className="button-row">
-          {!isConnected ? (
-            <button className="primary-button" disabled={!settings} onClick={handleStart} type="button">
-              Start listening
-            </button>
-          ) : (
-            <button className="danger-button" onClick={handleStop} type="button">
-              Stop session
-            </button>
-          )}
+          <button
+            className={`primary-button${isSessionActive ? " primary-button-listening" : ""}`}
+            disabled={!settings}
+            onClick={isSessionActive ? handleStop : handleStart}
+            type="button"
+          >
+            <span aria-hidden="true">{MICROPHONE_ICON}</span>
+            <span>{isSessionActive ? "Listening..." : "Start interpreting"}</span>
+          </button>
 
           <button className="secondary-button" onClick={handleResetSession} type="button">
             Reset session
@@ -791,16 +945,50 @@ export function TranslatorApp({
           </button>
         </div>
 
-        <div className="status-row">
-          <span className={`status-pill status-pill-${getConnectionTone(state.connectionStatus)}`}>
-            {getConnectionLabel(state.connectionStatus)}
+        {isSessionActive ? (
+          <div className="mic-feedback">
+            <div className="waveform" aria-hidden="true">
+              {waveformHeights.map((height, index) => (
+                <span
+                  className="waveform-bar"
+                  key={`wave-${index + 1}`}
+                  style={{
+                    height: `${height}px`,
+                    opacity: isSpeaking ? 0.35 : Math.max(0.4, height / 36),
+                  }}
+                />
+              ))}
+            </div>
+
+            <div className="input-meter-row">
+              <div
+                aria-label={MICROPHONE_LEVEL_LABEL}
+                aria-valuemax={100}
+                aria-valuemin={0}
+                aria-valuenow={inputLevelPercent}
+                aria-valuetext={isSpeaking ? "Microphone paused during playback" : `${inputLevelPercent}%`}
+                className="input-meter-track"
+                role="progressbar"
+              >
+                <span className="input-meter-fill" style={{ width: `${inputMeterWidth}%` }} />
+              </div>
+              <span className="input-meter-copy">{microphoneFeedbackText}</span>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="session-status-stack">
+          <span
+            aria-live="polite"
+            className={`status-pill status-pill-${getInterpreterActivityTone(
+              interpreterActivity,
+              state.connectionStatus,
+            )}`}
+          >
+            {getInterpreterActivityLabel(interpreterActivity)}
           </span>
           <span className="status-note">
-            Backend: {getProviderLabel(provider)}
-            {" | "}
-            Target: {getLanguageLabel(targetLanguage)}
-            {" | "}
-            Source: {sourceLanguageMode === "manual" ? getLanguageLabel(sourceLanguage) : "Auto detect"}
+            From: {sourceSummary} | To: {getLanguageLabel(targetLanguage)}
           </span>
           {copyMessage ? <span className="status-note">{copyMessage}</span> : null}
         </div>
@@ -814,77 +1002,95 @@ export function TranslatorApp({
       </section>
 
       <section className="pane-grid">
-        <article className="pane-card">
-          <div className="pane-header">
+        <article className="pane-card conversation-panel">
+          <div className="conversation-panel-header">
             <div>
-              <p className="pane-kicker">Source transcript</p>
-              <h2>What the speaker said</h2>
+              <p className="pane-kicker">Conversation history</p>
+              <div className="conversation-title-row">
+                <h2>You said</h2>
+                <span className="conversation-title-divider">{TITLE_DIVIDER}</span>
+                <h2>Translation</h2>
+              </div>
             </div>
-            <button
-              className="text-button"
-              onClick={() => handleCopy("transcript")}
-              type="button"
-            >
-              Copy transcript
-            </button>
+
+            <div className="conversation-copy-actions">
+              <button
+                className="text-button"
+                onClick={() => handleCopy("transcript")}
+                type="button"
+              >
+                Copy transcript
+              </button>
+              <button
+                className="text-button"
+                onClick={() => handleCopy("translation")}
+                type="button"
+              >
+                Copy translation
+              </button>
+            </div>
           </div>
 
           {turns.length === 0 ? (
             <div className="empty-state">
-              <p>Start a session and speak into the microphone to populate live turns.</p>
+              <p>Try saying something like: Hello, how are you?</p>
             </div>
           ) : (
             <div className="turn-list">
-              {turns.map((turn) => (
-                <article className="turn-card" key={`transcript-${turn.itemId}`}>
-                  <header className="turn-meta">
-                    <span>{turn.sourceLanguage ? getLanguageLabel(turn.sourceLanguage) : "Auto"}</span>
-                    <span>{getTurnStatusLabel(turn)}</span>
-                  </header>
-                  <p className="turn-body">
-                    {getTurnBodyText(turn, "transcript") || "Listening for speech..."}
-                  </p>
-                </article>
-              ))}
-            </div>
-          )}
-        </article>
+              {turns.map((turn, index) => {
+                const transcriptText = getTurnBodyText(turn, "transcript") || "Listening for speech...";
+                const translationText = getTurnBodyText(turn, "translation");
+                const replayText = (turn.translationFinal || turn.translationDraft).trim();
+                const sourceLabel = turn.sourceLanguage
+                  ? getLanguageLabel(turn.sourceLanguage)
+                  : sourceSummary;
 
-        <article className="pane-card">
-          <div className="pane-header">
-            <div>
-              <p className="pane-kicker">Translated output</p>
-              <h2>What it means in {getLanguageLabel(targetLanguage)}</h2>
-            </div>
-            <button
-              className="text-button"
-              onClick={() => handleCopy("translation")}
-              type="button"
-            >
-              Copy translation
-            </button>
-          </div>
+                return (
+                  <article className="turn-card conversation-turn-card" key={turn.itemId}>
+                    <header className="conversation-turn-header">
+                      <div className="conversation-turn-badges">
+                        <span className="conversation-chip">
+                          Turn {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <span className="conversation-chip conversation-chip-muted">
+                          {sourceLabel}
+                        </span>
+                      </div>
 
-          {turns.length === 0 ? (
-            <div className="empty-state">
-              <p>The translated pane fills as each completed source turn is processed.</p>
-            </div>
-          ) : (
-            <div className="turn-list">
-              {turns.map((turn) => (
-                <article className="turn-card" key={`translation-${turn.itemId}`}>
-                  <header className="turn-meta">
-                    <span>Turn {turn.itemId.slice(-4).toUpperCase()}</span>
-                    <span>{getTurnStatusLabel(turn)}</span>
-                  </header>
-                  <p className="turn-body">
-                    {getTurnBodyText(turn, "translation") ||
-                      (turn.status === "error"
-                        ? turn.error || "Translation failed."
-                        : "Waiting for translated text...")}
-                  </p>
-                </article>
-              ))}
+                      <div className="conversation-turn-actions">
+                        <span className="conversation-status">{getTurnStatusLabel(turn)}</span>
+                        {enableSpeech && replayText ? (
+                          <button
+                            aria-label={`Replay translation for turn ${index + 1}`}
+                            className="replay-button"
+                            onClick={() => handleReplayTranslation(replayText)}
+                            type="button"
+                          >
+                            <span aria-hidden="true">{SPEAKER_ICON}</span>
+                          </button>
+                        ) : null}
+                      </div>
+                    </header>
+
+                    <div className="conversation-turn-grid">
+                      <section className="conversation-block">
+                        <p className="conversation-label">You said</p>
+                        <p className="conversation-text">{transcriptText}</p>
+                      </section>
+
+                      <section className="conversation-block">
+                        <p className="conversation-label">Translation</p>
+                        <p className="conversation-text">
+                          {translationText ||
+                            (turn.status === "error"
+                              ? turn.error || "Translation failed."
+                              : "Waiting for translated text...")}
+                        </p>
+                      </section>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           )}
         </article>
@@ -892,6 +1098,3 @@ export function TranslatorApp({
     </main>
   );
 }
-
-
-

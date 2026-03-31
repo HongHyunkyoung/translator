@@ -1,6 +1,6 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+﻿import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TranslatorApp } from "@/components/translator-app";
 import type { RealtimeClientCallbacks, TranslatorClient } from "@/lib/realtime-client";
 import type { RealtimeProvider } from "@/lib/realtime-config";
@@ -48,12 +48,14 @@ function installSpeechSynthesisMock() {
   return { cancel, speak };
 }
 
-function installAudioPlaybackMocks(response: Response | Promise<Response> = new Response(new Blob(["fake-wav"], { type: "audio/wav" }), {
-  status: 200,
-  headers: {
-    "Content-Type": "audio/wav",
-  },
-})) {
+function installAudioPlaybackMocks(
+  response: Response | Promise<Response> = new Response(new Blob(["fake-wav"], { type: "audio/wav" }), {
+    status: 200,
+    headers: {
+      "Content-Type": "audio/wav",
+    },
+  }),
+) {
   const createObjectURL = vi.fn(() => "blob:tts-audio");
   const revokeObjectURL = vi.fn();
   const playMock = vi.fn().mockResolvedValue(undefined);
@@ -89,6 +91,18 @@ function installAudioPlaybackMocks(response: Response | Promise<Response> = new 
   };
 }
 
+function installClipboardMock() {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText,
+    },
+  });
+
+  return { writeText };
+}
+
 function renderTranslatorApp(
   provider: RealtimeProvider = "openai",
   options?: { speechStartTimeoutMs?: number },
@@ -100,6 +114,7 @@ function renderTranslatorApp(
     disconnect: vi.fn(),
     updateSettings: vi.fn(),
     requestTranslation: vi.fn(),
+    setInputMuted: vi.fn(),
   };
 
   const clientFactory = vi.fn((receivedCallbacks: RealtimeClientCallbacks) => {
@@ -108,8 +123,7 @@ function renderTranslatorApp(
   });
 
   const providerResolver = vi.fn().mockResolvedValue(provider);
-
-  render(
+  const view = render(
     <TranslatorApp
       clientFactory={clientFactory}
       providerResolver={providerResolver}
@@ -118,6 +132,7 @@ function renderTranslatorApp(
   );
 
   return {
+    ...view,
     user: userEvent.setup(),
     client,
     callbacks,
@@ -126,16 +141,53 @@ function renderTranslatorApp(
   };
 }
 
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe("TranslatorApp", () => {
-  it("detects the backend and updates settings when the source mode changes", async () => {
+  it("renders the updated hero copy and empty conversation placeholder", async () => {
+    const { client } = renderTranslatorApp("gemini");
+
+    expect(
+      screen.getByRole("heading", {
+        name: "Talk in your language. See and hear translations instantly.",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Start speaking and get realtime transcription and translation in one place.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Try saying something like: Hello, how are you?"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Backend:/)).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenCalledWith({
+        provider: "gemini",
+        targetLanguage: "en",
+        sourceLanguageMode: "auto",
+        sourceLanguage: "en",
+      });
+    });
+  });
+
+  it("keeps auto/manual source language logic inside the new From and To layout", async () => {
     const { user, client, providerResolver } = renderTranslatorApp("gemini");
 
-    const sourceMode = screen.getByLabelText("Source mode");
+    const fromMode = screen.getByLabelText("From mode");
     const manualSourceLanguage = screen.getByLabelText("Manual source language");
-    const speechToggle = screen.getByRole("checkbox", { name: "Speak translation aloud" });
+    const targetLanguage = screen.getByLabelText("To language");
+    const speechToggle = screen.getByRole("checkbox", {
+      name: "Automatically play translated speech",
+    });
 
     expect(manualSourceLanguage).toBeDisabled();
     expect(speechToggle).toBeChecked();
+    expect(screen.getByRole("button", { name: "Start interpreting" })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(providerResolver).toHaveBeenCalledTimes(1);
@@ -147,32 +199,35 @@ describe("TranslatorApp", () => {
       });
     });
 
-    await user.selectOptions(sourceMode, "manual");
-    await user.selectOptions(manualSourceLanguage, "ja");
-
+    await user.selectOptions(fromMode, "manual");
     expect(manualSourceLanguage).toBeEnabled();
+
+    await user.selectOptions(manualSourceLanguage, "ja");
+    await user.selectOptions(targetLanguage, "ko");
+
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenLastCalledWith({
         provider: "gemini",
-        targetLanguage: "en",
+        targetLanguage: "ko",
         sourceLanguageMode: "manual",
         sourceLanguage: "ja",
       });
     });
 
-    expect(await screen.findByText(/Backend: Gemini/)).toBeInTheDocument();
+    expect(screen.getByText("From: Japanese | To: Korean")).toBeInTheDocument();
   });
 
-  it("plays provider TTS audio when translated text is completed", async () => {
+  it("shows live mic level feedback, mutes input during playback, and supports replay", async () => {
     const { cancel, speak } = installSpeechSynthesisMock();
     const { createObjectURL, fetchMock, playMock } = installAudioPlaybackMocks();
-    const { user, client, callbacks } = renderTranslatorApp("openai");
+    const { user, client, callbacks, container } = renderTranslatorApp("openai");
+    const { writeText } = installClipboardMock();
 
     await waitFor(() => {
       expect(client.updateSettings).toHaveBeenCalled();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start listening" }));
+    await user.click(screen.getByRole("button", { name: "Start interpreting" }));
 
     expect(client.connect).toHaveBeenCalledWith({
       settings: {
@@ -185,16 +240,24 @@ describe("TranslatorApp", () => {
 
     act(() => {
       callbacks.onConnectionStatus("connected");
+      callbacks.onInputLevel(0.62);
       callbacks.onTurnCommitted({
         itemId: "turn-1",
         previousItemId: null,
-        sourceLanguage: "en",
+        sourceLanguage: "ko",
       });
       callbacks.onTranscriptCompleted({
         itemId: "turn-1",
-        transcript: "Hello there",
+        transcript: "Annyeonghaseyo",
       });
     });
+
+    expect(screen.getByRole("button", { name: "Listening..." })).toBeInTheDocument();
+    expect(container.querySelector(".waveform")).not.toBeNull();
+    expect(screen.getByText("Voice detected.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Microphone input level" }),
+    ).toHaveAttribute("aria-valuenow", "62");
 
     await waitFor(() => {
       expect(client.requestTranslation).toHaveBeenCalledWith("turn-1", {
@@ -221,12 +284,16 @@ describe("TranslatorApp", () => {
       });
     });
 
-    expect(await screen.findByText("Hello there")).toBeInTheDocument();
+    expect(await screen.findByText("Annyeonghaseyo")).toBeInTheDocument();
     expect(await screen.findByText("Hello")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "You said" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Translation" })).toBeInTheDocument();
+    expect(screen.getByText("Turn 01")).toBeInTheDocument();
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(playMock).toHaveBeenCalledTimes(1);
+      expect(client.setInputMuted).toHaveBeenCalledWith(true);
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -244,14 +311,19 @@ describe("TranslatorApp", () => {
       text: "Hello",
     });
     expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect(cancel).toHaveBeenCalledTimes(1);
     expect(speak).not.toHaveBeenCalled();
 
-    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    await user.click(screen.getByRole("button", { name: "Replay translation for turn 1" }));
+
+    expect(cancel).toHaveBeenCalled();
+    expect(speak).toHaveBeenCalledTimes(1);
+    const utterance = speak.mock.calls[0][0] as MockSpeechSynthesisUtteranceType;
+    expect(utterance.text).toBe("Hello");
+    expect(utterance.lang).toBe("en-US");
+    expect(utterance.rate).toBe(0.96);
 
     await user.click(screen.getByRole("button", { name: "Copy transcript" }));
-
-    expect(writeText).toHaveBeenCalledWith("Hello there");
+    expect(writeText).toHaveBeenCalledWith("Annyeonghaseyo");
     expect(await screen.findByText("Transcript copied.")).toBeInTheDocument();
   });
 
@@ -281,6 +353,7 @@ describe("TranslatorApp", () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(speak).toHaveBeenCalledTimes(1);
+      expect(client.setInputMuted).toHaveBeenCalledWith(true);
     });
 
     expect(playMock).not.toHaveBeenCalled();
@@ -300,45 +373,7 @@ describe("TranslatorApp", () => {
     await Promise.resolve();
   });
 
-  it("falls back to browser speech when provider TTS fails", async () => {
-    const { cancel, speak } = installSpeechSynthesisMock();
-    const { fetchMock, playMock } = installAudioPlaybackMocks(
-      new Response(JSON.stringify({ error: "TTS unavailable" }), {
-        status: 502,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      }),
-    );
-    const { callbacks, client } = renderTranslatorApp("openai");
-
-    await waitFor(() => {
-      expect(client.updateSettings).toHaveBeenCalled();
-    });
-
-    act(() => {
-      callbacks.onTranslationOutputDone({
-        responseId: "response-2",
-        itemId: "turn-2",
-        text: "Hello again",
-      });
-    });
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(speak).toHaveBeenCalledTimes(1);
-    });
-
-    expect(playMock).not.toHaveBeenCalled();
-    const utterance = speak.mock.calls[0][0] as MockSpeechSynthesisUtteranceType;
-    expect(utterance.text).toBe("Hello again");
-    expect(utterance.lang).toBe("en-US");
-    expect(utterance.rate).toBe(0.96);
-    expect(utterance.voice?.name).toBe("Google US English Natural");
-    expect(cancel).toHaveBeenCalled();
-  });
-
-  it("does not speak when the speech toggle is disabled", async () => {
+  it("disables automatic playback and hides replay controls when speech is turned off", async () => {
     const { speak } = installSpeechSynthesisMock();
     const { fetchMock, playMock } = installAudioPlaybackMocks();
     const { user, callbacks, client } = renderTranslatorApp("openai");
@@ -347,18 +382,38 @@ describe("TranslatorApp", () => {
       expect(client.updateSettings).toHaveBeenCalled();
     });
 
-    await user.click(screen.getByRole("checkbox", { name: "Speak translation aloud" }));
+    await user.click(
+      screen.getByRole("checkbox", { name: "Automatically play translated speech" }),
+    );
 
     act(() => {
+      callbacks.onTurnCommitted({
+        itemId: "turn-2",
+        previousItemId: null,
+        sourceLanguage: "ko",
+      });
+      callbacks.onTranscriptCompleted({
+        itemId: "turn-2",
+        transcript: "Jigeum doenayo",
+      });
       callbacks.onTranslationOutputDone({
-        responseId: "response-3",
-        itemId: "turn-3",
-        text: "Konnichiwa",
+        responseId: "response-2",
+        itemId: "turn-2",
+        text: "Is this working now?",
+      });
+      callbacks.onResponseDone({
+        responseId: "response-2",
+        itemId: "turn-2",
       });
     });
 
+    expect(await screen.findByText("Is this working now?")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(playMock).not.toHaveBeenCalled();
     expect(speak).not.toHaveBeenCalled();
+    expect(client.setInputMuted).not.toHaveBeenCalledWith(true);
+    expect(
+      screen.queryByRole("button", { name: "Replay translation for turn 1" }),
+    ).not.toBeInTheDocument();
   });
 });
