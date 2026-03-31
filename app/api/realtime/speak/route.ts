@@ -34,7 +34,7 @@ function getGeminiTtsModel() {
 
 function getGeminiTtsVoice(targetLanguage: string) {
   if (targetLanguage === "ko") {
-    return process.env.GEMINI_TTS_VOICE_KO ?? process.env.GEMINI_TTS_VOICE ?? "Kore";
+    return process.env.GEMINI_TTS_VOICE_KO ?? process.env.GEMINI_TTS_VOICE ?? "Sulafat";
   }
 
   return process.env.GEMINI_TTS_VOICE ?? "Achird";
@@ -77,7 +77,7 @@ function buildSpeechInstructions(targetLanguage: string) {
   const targetLabel = getLanguageLabel(targetLanguage);
   const localeSpecificInstruction =
     targetLanguage === "ko"
-      ? "Use natural Korean pacing and sentence endings so the speech sounds fluid and native."
+      ? "Speak in fluent standard Korean with smooth Seoul-style intonation. Avoid choppy syllables, overly formal narration, or robotic pacing. Use natural sentence endings and connected phrasing so the voice feels like a real person speaking."
       : null;
 
   return [
@@ -311,5 +311,4 @@ export async function POST(request: Request) {
     ? createGeminiSpeech(text, normalized.targetLanguage)
     : createOpenAISpeech(text, normalized.targetLanguage);
 }
-
 

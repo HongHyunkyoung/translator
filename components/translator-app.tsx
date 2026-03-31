@@ -43,7 +43,7 @@ const MICROPHONE_ICON = "\uD83C\uDFA4";
 const SPEAKER_ICON = "\uD83D\uDD0A";
 const TITLE_DIVIDER = "\u2192";
 const MICROPHONE_LEVEL_LABEL = "Microphone input level";
-const SERVER_TTS_START_TIMEOUT_MS = 900;
+const SERVER_TTS_START_TIMEOUT_MS = 2200;
 
 async function resolveProviderFromServer(): Promise<RealtimeProvider> {
   const response = await fetch("/api/realtime/provider", {
@@ -456,7 +456,7 @@ export function TranslatorApp({
     }
 
     stopActiveSpeech();
-    playBrowserTranslation(text, targetLanguageRef.current);
+    void playTranslationAudio(text);
   }
 
   async function playTranslationAudio(text: string) {
@@ -489,6 +489,9 @@ export function TranslatorApp({
     speechAbortControllerRef.current = abortController;
 
     let timeoutId: number | null = null;
+    const timeoutWindowMs =
+      activeProvider === "gemini" ? Math.max(speechStartTimeoutMs, 4000) : speechStartTimeoutMs;
+
     const requestPromise = fetch("/api/realtime/speak", {
       method: "POST",
       headers: {
@@ -507,7 +510,7 @@ export function TranslatorApp({
     const timeoutPromise = new Promise<{ kind: "timeout" }>((resolve) => {
       timeoutId = window.setTimeout(() => {
         resolve({ kind: "timeout" });
-      }, speechStartTimeoutMs);
+      }, timeoutWindowMs);
     });
 
     const settleTimeout = () => {

@@ -161,7 +161,7 @@ describe("POST /api/realtime/speak", () => {
           languageCode: "ko-KR",
           voiceConfig: {
             prebuiltVoiceConfig: {
-              voiceName: "Kore",
+              voiceName: "Sulafat",
             },
           },
         },
@@ -213,5 +213,4 @@ describe("POST /api/realtime/speak", () => {
     });
   });
 });
-
 

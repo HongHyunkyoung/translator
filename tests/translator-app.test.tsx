@@ -1,4 +1,4 @@
-﻿import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TranslatorApp } from "@/components/translator-app";
@@ -60,7 +60,13 @@ function installAudioPlaybackMocks(
   const revokeObjectURL = vi.fn();
   const playMock = vi.fn().mockResolvedValue(undefined);
   const pauseMock = vi.fn();
-  const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(response));
+  const fetchMock = vi.fn().mockImplementation(() => {
+    if (typeof (response as Promise<Response>)?.then === "function") {
+      return Promise.resolve(response);
+    }
+
+    return Promise.resolve((response as Response).clone());
+  });
 
   class MockAudio {
     onended: (() => void) | null = null;
@@ -315,12 +321,18 @@ describe("TranslatorApp", () => {
 
     await user.click(screen.getByRole("button", { name: "Replay translation for turn 1" }));
 
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(playMock).toHaveBeenCalledTimes(2);
+    });
+
     expect(cancel).toHaveBeenCalled();
-    expect(speak).toHaveBeenCalledTimes(1);
-    const utterance = speak.mock.calls[0][0] as MockSpeechSynthesisUtteranceType;
-    expect(utterance.text).toBe("Hello");
-    expect(utterance.lang).toBe("en-US");
-    expect(utterance.rate).toBe(0.96);
+    expect(speak).not.toHaveBeenCalled();
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      provider: "openai",
+      targetLanguage: "en",
+      text: "Hello",
+    });
 
     await user.click(screen.getByRole("button", { name: "Copy transcript" }));
     expect(writeText).toHaveBeenCalledWith("Annyeonghaseyo");
@@ -417,3 +429,4 @@ describe("TranslatorApp", () => {
     ).not.toBeInTheDocument();
   });
 });
+
