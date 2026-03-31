@@ -183,6 +183,20 @@ async function readSpeechErrorResponse(response: Response) {
   }
 }
 
+async function readTranslationErrorResponse(response: Response) {
+  const text = await response.text();
+  if (!text) {
+    return `Translation route returned ${response.status}.`;
+  }
+
+  try {
+    const payload = JSON.parse(text) as { error?: unknown };
+    return typeof payload.error === "string" && payload.error ? payload.error : text;
+  } catch {
+    return text;
+  }
+}
+
 function canUseBrowserSpeechSynthesis() {
   return (
     typeof window !== "undefined" &&
@@ -508,6 +522,61 @@ export function TranslatorApp({
 
     stopActiveSpeech();
     void playTranslationAudio(text);
+  }
+
+  async function requestServerTranslation(
+    itemId: string,
+    transcript: string,
+    activeSettings: TranslatorSettings,
+  ) {
+    try {
+      const response = await fetch("/api/realtime/translate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: activeSettings.provider,
+          transcript,
+          settings: activeSettings,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readTranslationErrorResponse(response));
+      }
+
+      const payload = (await response.json()) as { text?: unknown };
+      const translatedText = typeof payload.text === "string" ? payload.text.trim() : "";
+      if (!translatedText) {
+        throw new Error("The translation route did not return translated text.");
+      }
+
+      startTransition(() => {
+        dispatch({
+          type: "translation/outputDone",
+          itemId,
+          text: translatedText,
+        });
+        dispatch({
+          type: "translation/responseDone",
+          itemId,
+          failedMessage: null,
+        });
+      });
+
+      if (enableSpeechRef.current) {
+        void playTranslationAudio(translatedText);
+      }
+    } catch (error) {
+      startTransition(() => {
+        dispatch({
+          type: "translation/error",
+          itemId,
+          message: describeError(error),
+        });
+      });
+    }
   }
 
   async function playTranslationAudio(text: string) {
@@ -846,8 +915,14 @@ export function TranslatorApp({
 
     try {
       dispatch({ type: "translation/requested", itemId: nextQueuedTurnId });
+
+      if (settings.provider === "openai") {
+        void requestServerTranslation(nextQueuedTurnId, queuedTranscript, settings);
+        return;
+      }
+
       clientRef.current?.requestTranslation(nextQueuedTurnId, settings, {
-        enableAudio: settings.provider === "openai" ? enableSpeechRef.current : false,
+        enableAudio: false,
       });
     } catch (error) {
       const message = describeError(error);
