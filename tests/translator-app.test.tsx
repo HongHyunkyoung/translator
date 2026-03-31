@@ -385,6 +385,52 @@ describe("TranslatorApp", () => {
     await Promise.resolve();
   });
 
+  it("skips browser speech fallback for Korean and surfaces the speech error instead", async () => {
+    const { speak } = installSpeechSynthesisMock();
+    const { fetchMock, playMock } = installAudioPlaybackMocks(
+      new Response(JSON.stringify({ error: "TTS quota exceeded." }), {
+        status: 502,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+    const { user, callbacks, client } = renderTranslatorApp("openai");
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenCalled();
+    });
+
+    await user.selectOptions(screen.getByLabelText("To language"), "ko");
+
+    await waitFor(() => {
+      expect(client.updateSettings).toHaveBeenLastCalledWith({
+        provider: "openai",
+        targetLanguage: "ko",
+        sourceLanguageMode: "auto",
+        sourceLanguage: "en",
+      });
+    });
+
+    act(() => {
+      callbacks.onTranslationOutputDone({
+        responseId: "response-ko-error",
+        itemId: "turn-ko-error",
+        text: "Please read this naturally.",
+      });
+    });
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(playMock).not.toHaveBeenCalled();
+    expect(speak).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/Korean speech playback failed, so browser fallback was skipped/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/TTS quota exceeded\./i)).toBeInTheDocument();
+  });
   it("disables automatic playback and hides replay controls when speech is turned off", async () => {
     const { speak } = installSpeechSynthesisMock();
     const { fetchMock, playMock } = installAudioPlaybackMocks();

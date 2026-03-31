@@ -334,6 +334,7 @@ export function TranslatorApp({
   const [sourceLanguage, setSourceLanguage] = useState("en");
   const [enableSpeech, setEnableSpeech] = useState(true);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [speechMessage, setSpeechMessage] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [inputLevel, setInputLevel] = useState(0);
   const clientRef = useRef<TranslatorClient | null>(null);
@@ -478,6 +479,8 @@ export function TranslatorApp({
       return;
     }
 
+    setSpeechMessage(null);
+
     const requestId = speechRequestRef.current + 1;
     speechRequestRef.current = requestId;
     speechAbortControllerRef.current?.abort();
@@ -524,7 +527,9 @@ export function TranslatorApp({
       }
     };
 
-    const fallbackToBrowserSpeech = () => {
+    const disableBrowserSpeechFallback = activeTargetLanguage === "ko";
+
+    const fallbackToBrowserSpeech = (reason?: string) => {
       abortController?.abort();
       if (speechAbortControllerRef.current === abortController) {
         speechAbortControllerRef.current = null;
@@ -534,6 +539,18 @@ export function TranslatorApp({
       }
       releaseActiveAudio();
       setIsSpeaking(false);
+
+      if (disableBrowserSpeechFallback) {
+        setInputMuted(false);
+        setSpeechMessage(
+          reason
+            ? `Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice. ${reason}`
+            : "Korean speech playback failed, so browser fallback was skipped to avoid the robotic system voice.",
+        );
+        return;
+      }
+
+      setSpeechMessage(reason ? `Speech playback fell back to your browser voice. ${reason}` : null);
       playBrowserTranslation(spokenText, activeTargetLanguage);
     };
 
@@ -542,7 +559,7 @@ export function TranslatorApp({
       settleTimeout();
 
       if (outcome.kind === "timeout") {
-        fallbackToBrowserSpeech();
+        fallbackToBrowserSpeech(`Speech generation timed out after ${timeoutWindowMs}ms.`);
         return;
       }
 
@@ -550,13 +567,13 @@ export function TranslatorApp({
         if (isAbortError(outcome.error)) {
           return;
         }
-        fallbackToBrowserSpeech();
+        fallbackToBrowserSpeech(describeError(outcome.error));
         return;
       }
 
       if (!outcome.response.ok) {
-        void readSpeechErrorResponse(outcome.response);
-        fallbackToBrowserSpeech();
+        const speechErrorMessage = await readSpeechErrorResponse(outcome.response);
+        fallbackToBrowserSpeech(speechErrorMessage);
         return;
       }
 
@@ -608,7 +625,7 @@ export function TranslatorApp({
       }
 
       setIsSpeaking(false);
-      fallbackToBrowserSpeech();
+      fallbackToBrowserSpeech(describeError(error));
     }
   }
 
@@ -998,6 +1015,7 @@ export function TranslatorApp({
             From: {sourceSummary} | To: {getLanguageLabel(targetLanguage)}
           </span>
           {copyMessage ? <span className="status-note">{copyMessage}</span> : null}
+          {speechMessage ? <span className="status-note">{speechMessage}</span> : null}
         </div>
 
         {state.errorMessage ? (
